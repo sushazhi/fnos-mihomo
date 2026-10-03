@@ -1,0 +1,53 @@
+[
+  {
+    "stepTitle": "Mihomo 设置",
+    "items": [
+      {
+        "type": "text",
+        "field": "wizard_mixed_port",
+        "label": "混合代理端口",
+        "initValue": "7890",
+        "helpText": "修改后需重启应用生效",
+        "rules": [
+          { "required": true, "message": "请输入端口" },
+          { "pattern": "^[0-9]+$", "message": "必须是数字" }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_api_port",
+        "label": "Clash API 端口",
+        "initValue": "9090",
+        "helpText": "面板与状态页的连接端口",
+        "rules": [
+          { "required": true, "message": "请输入端口" },
+          { "pattern": "^[0-9]+$", "message": "必须是数字" }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "wizard_api_secret",
+        "label": "API 密钥",
+        "initValue": "",
+        "helpText": "留空表示保持现有密钥不变",
+        "rules": [
+          { "min": 4, "message": "至少 4 位" }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_subscription_url",
+        "label": "订阅链接",
+        "initValue": "",
+        "helpText": "留空表示保持现有订阅不变"
+      },
+      {
+        "type": "switch",
+        "field": "wizard_allow_lan",
+        "label": "允许局域网连接",
+        "initValue": "true",
+        "helpText": "关闭后仅本机可使用代理端口"
+      }
+    ]
+  }
+]

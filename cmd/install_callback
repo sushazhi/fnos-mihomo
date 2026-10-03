@@ -1,0 +1,8 @@
+#!/bin/bash
+# 安装后执行：初始化数据目录与默认配置。
+set -uo pipefail
+
+DATA_DIR="${TRIM_PKGVAR:-/var/apps/${TRIM_APPNAME:-mihomo}/var}"
+mkdir -p "${DATA_DIR}"
+touch "${DATA_DIR}/mihomo.log"
+exit 0

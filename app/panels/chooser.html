@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>选择管理面板 · Mihomo</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f8fa; --card:#fff; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --accent:#0969da; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --card:#161b22; --fg:#e6edf3; --muted:#8b949e; --line:#30363d; --accent:#4493f8; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+         font-family: system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  main { max-width: 760px; margin:0 auto; padding: 40px 20px 64px; }
+  h1 { font-size: 22px; margin:0 0 6px; }
+  .sub { color:var(--muted); font-size:13.5px; margin-bottom:24px; }
+  .grid { display:grid; gap:14px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 620px) { .grid { grid-template-columns: 1fr; } }
+  .card { display:block; text-decoration:none; color:inherit; background:var(--card);
+          border:1px solid var(--line); border-radius:12px; padding:18px 18px 16px;
+          transition: border-color .15s, transform .15s; }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .card h2 { font-size:16.5px; margin:0 0 6px; }
+  .badge { display:inline-block; font-size:11px; padding:2px 7px; border-radius:999px;
+           background:rgba(9,105,218,.12); color:var(--accent); margin-left:7px; vertical-align:2px; }
+  .desc { color:var(--muted); font-size:13px; line-height:1.6; margin:0 0 12px; }
+  .meta { font-size:12px; color:var(--muted); }
+  .foot { margin-top:22px; font-size:12.5px; color:var(--muted); line-height:1.8; }
+  .foot a { color:var(--accent); text-decoration:none; }
+  .foot a:hover { text-decoration:underline; }
+  .note { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:14px 18px; margin-top:18px; font-size:13px; line-height:1.7; }
+  code { background:rgba(127,127,127,.15); padding:2px 6px; border-radius:5px; font-size:12.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>选择管理面板</h1>
+  <div class="sub">两个面板都已内置在本应用中，无需额外安装。选择后会被记住，下次点图标直接进入。</div>
+
+  <div class="grid">
+    <a class="card" href="./panel/metacubexd/" data-panel="metacubexd">
+      <h2>MetaCubeXD<span class="badge">官方</span></h2>
+      <p class="desc">mihomo 官方面板（MetaCubeX 出品），与内核同一组织，API 兼容性最有保障。</p>
+      <div class="meta">已预配置后端地址 · 打开即用</div>
+    </a>
+
+    <a class="card" href="./panel/zashboard/" data-panel="zashboard">
+      <h2>Zashboard</h2>
+      <p class="desc">界面更现代，移动端体验好，支持地球可视化等特色功能。</p>
+      <div class="meta">首次需在面板内添加后端地址（见下方说明）</div>
+    </a>
+  </div>
+
+  <div class="note">
+    <strong>Zashboard 首次使用需填一次后端地址：</strong><br>
+    进入后点设置 → 添加后端，地址填本页所在域名即可，例如：
+    <div style="margin-top:8px">
+      <code id="backend-hint">http://&lt;NAS-IP&gt;:9090</code>
+    </div>
+    <div style="margin-top:8px;color:var(--muted);font-size:12.5px">
+      若你也希望通过本应用免填密钥访问，请从 fnOS 桌面图标进入（经网关），
+      或直接在地址里使用当前页面地址。
+    </div>
+  </div>
+
+  <div class="foot">
+    想改用另一个面板？面板<strong>右下角</strong>有「⇄ 面板」浮动入口，点开即可切换，
+    无需改地址。<br>
+    也可以回到 <a href="./?choose=1">本选择页</a> 重新选择。<br>
+    仅需查看内核运行状态？打开 <a href="./index.html">状态页</a>。
+  </div>
+</main>
+
+<script>
+// 记住选择：下次点桌面图标直接进对应面板。
+//
+// 为什么放 localStorage 而不是服务端配置：
+//   fnOS 是多用户系统，服务端只有一份配置，A 用户的选择会覆盖 B 用户的；
+//   localStorage 按浏览器隔离，天然做到"每个用户各自记住"。
+// 代价：换浏览器/清缓存后会重新问一次 —— 这是可接受的。
+const KEY = "mihomo/panel";
+// 用 ./ 前缀，保证在选择页地址是 /app/mihomo/ 时解析正确；
+// 若地址缺尾斜杠，服务端会先 301 补上（见 ui_server.py 的 needs_trailing_slash）。
+const PANELS = {
+  metacubexd: "./panel/metacubexd/",
+  zashboard: "./panel/zashboard/",
+};
+
+// 1) 记住选择
+document.querySelectorAll(".card").forEach((el) => {
+  el.addEventListener("click", () => {
+    try { localStorage.setItem(KEY, el.dataset.panel); } catch (e) {}
+  });
+});
+
+// 2) 已选过则直接跳转（除非显式要求显示选择页 ?choose=1）
+let forceChoose = false;
+try {
+  forceChoose = new URLSearchParams(location.search).get("choose") === "1";
+} catch (e) {}
+
+if (!forceChoose) {
+  let saved = null;
+  try { saved = localStorage.getItem(KEY); } catch (e) {}
+  if (saved && PANELS[saved]) {
+    // 标记：说明这次是"记住的选择"直接进入，面板内可提供"切换面板"入口
+    location.replace(PANELS[saved]);
+  }
+}
+
+// 3) 把后端地址提示填成当前可用的地址，方便 Zashboard 用户复制
+try {
+  const hint = document.getElementById("backend-hint");
+  if (hint && location.origin && location.origin !== "null") {
+    hint.textContent = location.origin + "/api";
+  }
+} catch (e) {}
+</script>
+</body>
+</html>

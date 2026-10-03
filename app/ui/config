@@ -1,0 +1,25 @@
+{
+  ".url": {
+    "mihomo.main": {
+      "title": "Mihomo",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/mihomo",
+      "gatewaySocket": "app.sock",
+      "url": "/app/mihomo",
+      "allUsers": true
+    },
+    "mihomo.status": {
+      "title": "Mihomo 状态",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/mihomo/status",
+      "gatewaySocket": "app.sock",
+      "url": "/app/mihomo/status",
+      "allUsers": true,
+      "noDisplay": true
+    }
+  }
+}

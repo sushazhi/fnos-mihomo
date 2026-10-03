@@ -1,0 +1,212 @@
+name: 每周检查上游更新
+
+# 每周五 02:00 UTC（也就是北京时间周五 10:00）检查 mihomo 内核与两个面板
+# 是否有新版本；有则更新 manifest、提交、并复用 build-fpk.yml 构建发布。
+# 没有更新就直接跳过，不构建、不提交、不发 Release。
+#
+# 为什么是周五：上游 mihomo 发版通常在工作日，周五跑能在周末前出包。
+# cron 用 UTC，GitHub Actions 的 cron **不支持时区**（只认 UTC），别改成 CST。
+on:
+  schedule:
+    - cron: "0 2 * * 5"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "即使检测到已发布过也强制构建发布（排障用，谨慎）"
+        required: false
+        type: boolean
+        default: false
+
+# 检查 → 决定 → 构建发布，全流程需要：
+#   contents: write —— 提交 manifest 改动 + 建 tag/Release
+#   actions: write  —— 触发下游 workflow
+permissions:
+  contents: write
+  actions: write
+
+# 同一时间只允许一个检查在跑，避免两个 run 同时判定「有更新」而重复发版
+concurrency:
+  group: auto-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.decide.outputs.changed }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+      reason: ${{ steps.decide.outputs.reason }}
+      mcx: ${{ steps.probe.outputs.metacubexd }}
+      zash: ${{ steps.probe.outputs.zashboard }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 默认浅克隆即可：判重靠仓库里的 scripts/pinned-versions.json，
+          # 不再依赖本地 tag 列表。
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 探测上游当前版本。脚本在探测失败时以退出码 2 结束 —— 这是刻意的：
+      # 「查不到」绝不能当成「没更新」，否则会出现长期不发版却一直绿灯。
+      # 脚本同时读 scripts/pinned-versions.json，算出本次该用哪个包版本：
+      #   内核变了 → <内核版本>          （如 1.19.32）
+      #   只有面板变 → <内核版本>.<序号>   （如 1.19.32.1）
+      - name: 探测上游版本
+        id: probe
+        run: python scripts/check-updates.py
+
+      - name: 判定是否需要构建
+        id: decide
+        env:
+          # ⚠️ 通过 env 传参，不要直接内插到 run 里：内插会被 shell 解释，
+          #    版本号若含特殊字符可能造成注入或语法错误。
+          NEED: ${{ steps.probe.outputs.needs_build }}
+          PKG: ${{ steps.probe.outputs.package_version }}
+          TAG: ${{ steps.probe.outputs.release_tag }}
+          KERNEL: ${{ steps.probe.outputs.kernel }}
+          KC: ${{ steps.probe.outputs.kernel_changed }}
+          PC: ${{ steps.probe.outputs.panels_changed }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          echo "内核=${KERNEL} 内核变化=${KC} 面板变化=${PC}"
+          echo "拟用包版本=${PKG}  tag=${TAG}"
+
+          if [ -z "${KERNEL}" ]; then
+            echo "ERROR: 上游内核版本为空，拒绝判定为「无更新」"
+            exit 1
+          fi
+
+          if [ "${FORCE}" = "true" ]; then
+            # 手动强制：即便判定无需构建也强行出一版。
+            # 若 PKG 为空（确实没变化），回退到当前内核版本，避免空版本号。
+            if [ -z "${PKG}" ]; then
+              PKG="${KERNEL}"
+              TAG="v${KERNEL}"
+            fi
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "reason=手动强制" >> "$GITHUB_OUTPUT"
+          elif [ "${NEED}" = "true" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            if [ "${KC}" = "true" ]; then
+              echo "reason=内核更新 → ${KERNEL}" >> "$GITHUB_OUTPUT"
+            else
+              echo "reason=面板更新，出 ${PKG}（内核 ${KERNEL} 未变）" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # 无需构建：脚本比对「上游最新」与「上次打包记录」后判定没有变化。
+            #
+            # 这里**不需要**再查 tag 去重：去重依据就是仓库里的状态文件本身 ——
+            # 上一轮成功时已把上游版本写回 pinned-versions.json，本轮自然算出
+            # 「无变化」。反过来若上一轮构建/推送中断，状态没更新，本轮会重算出
+            # 同一个版本号并重试，这正是我们想要的补齐行为。
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=上游无变化（与 scripts/pinned-versions.json 一致），跳过" >> "$GITHUB_OUTPUT"
+            PKG=""
+          fi
+
+          echo "version=${PKG}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: 更新 manifest 的 version
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          # 只改 version 行，保持其余字段（含缩进/注释）原样
+          python - <<'PY'
+          import os, re
+          v = os.environ["VERSION"]
+          p = "manifest"
+          s = open(p, encoding="utf-8").read()
+          new, n = re.subn(r"(?m)^version\s*=.*$", "version = %s" % v, s, count=1)
+          assert n == 1, "manifest 里没找到 version 行"
+          open(p, "w", encoding="utf-8", newline="").write(new)
+          print("manifest version →", v)
+          PY
+          git --no-pager diff --stat
+
+      # 把「本次打包用的上游版本」写进状态文件。这一步必须在构建**之前**也
+      # 一起提交，理由同下方注释：先记录再发布，失败可重试，不会永久卡住。
+      - name: 记录本次打包的上游版本
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          KERNEL: ${{ steps.probe.outputs.kernel }}
+          MCX: ${{ steps.probe.outputs.metacubexd }}
+          ZASH: ${{ steps.probe.outputs.zashboard }}
+          SEQ: ${{ steps.probe.outputs.panel_seq }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          p = "scripts/pinned-versions.json"
+          d = json.load(open(p, encoding="utf-8"))
+          d["kernel"] = os.environ["KERNEL"]
+          d["metacubexd"] = os.environ["MCX"]
+          d["zashboard"] = os.environ["ZASH"]
+          d["panel_seq"] = int(os.environ.get("SEQ") or 0)
+          json.dump(d, open(p, "w", encoding="utf-8", newline=""),
+                    ensure_ascii=False, indent=2)
+          open(p, "a", encoding="utf-8").write("\n")
+          print("已记录:", d["kernel"], d["metacubexd"], d["zashboard"], d["panel_seq"])
+          PY
+
+      # 提交顺序很重要：
+      #   先把 manifest + 状态文件推上去（记录「本包用哪个内核/面板」），
+      #   再由复用 workflow 发 Release。若反过来，一旦提交因分支保护失败，
+      #   就会出现「已发布 Release 但仓库记录还指向旧版本」的不一致。
+      # ⚠️ 若默认分支开启分支保护，这里的 push 会被拒。届时改用 PR 方式，
+      #    或在仓库设置里给 github-actions[bot] 放行。
+      - name: 提交 manifest 与状态文件
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest scripts/pinned-versions.json
+          if git diff --cached --quiet; then
+            echo "无变化，跳过提交"
+          else
+            git commit -m "chore: 发布 ${VERSION}（记录本次打包的上游版本）"
+            git push
+            echo "已提交并推送"
+          fi
+
+  build:
+    needs: check
+    # 没有更新就整段跳过 —— 不构建、不发版
+    if: needs.check.outputs.changed == 'true'
+    uses: ./.github/workflows/build-fpk.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+    # 让被复用 workflow 里的 secrets 可用（GITHUB_TOKEN 是自动注入的，无需声明；
+    # 若将来加了别的 secret，在这里 inherit 即可）
+    secrets: inherit
+
+  summary:
+    needs: [check, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总
+        run: |
+          {
+            echo "## 每周上游检查"
+            echo ""
+            echo "- 判定结果：**${{ needs.check.outputs.changed }}**"
+            echo "- 原因：${{ needs.check.outputs.reason }}"
+            echo "- 版本：\`${{ needs.check.outputs.version }}\`"
+            echo "- Tag：\`${{ needs.check.outputs.tag }}\`"
+            echo "- MetaCubeXD：\`${{ needs.check.outputs.mcx }}\`"
+            echo "- Zashboard：\`${{ needs.check.outputs.zash }}\`"
+            echo "- 构建结果：\`${{ needs.build.result }}\`"
+            echo ""
+            echo "> 版本规则：内核更新 → \`<内核版本>\`；仅面板更新 → \`<内核版本>.<序号>\`。"
+          } >> "$GITHUB_STEP_SUMMARY"

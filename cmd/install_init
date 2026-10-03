@@ -1,0 +1,10 @@
+#!/bin/bash
+# 安装前执行：做环境预检。失败时写 TRIM_TEMP_LOGFILE 并返回非零。
+set -uo pipefail
+
+if [ ! -d "/dev/net" ] && [ ! -e "/dev/net/tun" ]; then
+    # 仅提示，不阻断：即使没有 TUN 设备，代理端口模式仍可用
+    echo "提示：未检测到 /dev/net/tun，TUN 模式将不可用（代理端口模式不受影响）。" \
+        >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+fi
+exit 0

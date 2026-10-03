@@ -1,0 +1,62 @@
+#!/bin/bash
+# 配置变更后执行：把「应用设置」的值落盘为 settings.env，供 cmd/main 读取。
+#
+# 向导字段以同名环境变量传入（无 TRIM_ 前缀）。
+# 留空语义：订阅链接 / API 密钥留空表示「保持现有值不变」，避免把已配置的密钥清空。
+set -uo pipefail
+
+APP_NAME="${TRIM_APPNAME:-mihomo}"
+DATA_DIR="${TRIM_PKGVAR:-/var/apps/${APP_NAME}/var}"
+SETTINGS="${DATA_DIR}/settings.env"
+
+mkdir -p "${DATA_DIR}"
+
+# 读取现有值作为回退
+old_mixed=""; old_api=""; old_secret=""; old_sub=""; old_lan=""
+if [ -f "${SETTINGS}" ]; then
+    # shellcheck disable=SC1090
+    . "${SETTINGS}" || true
+    old_mixed="${MIHOMO_MIXED_PORT:-}"
+    old_api="${MIHOMO_API_PORT:-}"
+    old_secret="${MIHOMO_API_SECRET:-}"
+    old_sub="${MIHOMO_SUBSCRIPTION_URL:-}"
+    old_lan="${MIHOMO_ALLOW_LAN:-}"
+fi
+
+mixed="${wizard_mixed_port:-${old_mixed:-7890}}"
+api="${wizard_api_port:-${old_api:-9090}}"
+secret="${wizard_api_secret:-}"
+sub="${wizard_subscription_url:-}"
+lan="${wizard_allow_lan:-${old_lan:-true}}"
+
+[ -n "${secret}" ] || secret="${old_secret}"
+[ -n "${sub}" ] || sub="${old_sub}"
+
+# 端口必须是数字且落在合法区间
+for p in "${mixed}" "${api}"; do
+    case "${p}" in
+        ''|*[!0-9]*) echo "端口必须是数字：${p}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+    esac
+    if [ "${p}" -lt 1 ] || [ "${p}" -gt 65535 ]; then
+        echo "端口超出范围 1-65535：${p}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1
+    fi
+done
+
+# 首次未填密钥则生成随机密钥，便于面板安全连接
+if [ -z "${secret}" ]; then
+    secret="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)"
+fi
+
+umask 077
+cat > "${SETTINGS}" <<SETTINGS_EOF
+MIHOMO_MIXED_PORT=${mixed}
+MIHOMO_API_PORT=${api}
+MIHOMO_UI_PORT=9092
+MIHOMO_API_SECRET=${secret}
+MIHOMO_SUBSCRIPTION_URL=${sub}
+MIHOMO_ALLOW_LAN=${lan}
+SETTINGS_EOF
+chmod 600 "${SETTINGS}"
+
+echo "配置已保存。重启应用后生效。" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+exit 0

@@ -1,0 +1,459 @@
+#!/bin/bash
+# Mihomo fnOS 应用 — 运行控制脚本
+#
+# 契约（飞牛官方 应用框架 文档）：
+#   main start  → 启动服务，成功 0
+#   main stop   → 停止服务，成功 0
+#   main status → 运行中 0，未运行 3，出错 1
+#
+# 路径全部来自 TRIM_* 环境变量，不硬编码。
+
+set -uo pipefail
+
+APP_NAME="${TRIM_APPNAME:-mihomo}"
+# 官方要求优先使用 TRIM_* 环境变量。这里 TRIM_* 缺失即视为异常环境（例如手工调试），
+# 打印明确错误而不是猜测一个硬编码路径 —— 硬编码卷号是常见 bug 来源。
+: "${TRIM_APPDEST:?TRIM_APPDEST 未设置（该脚本应由 fnOS 应用中心调用）}"
+: "${TRIM_PKGVAR:?TRIM_PKGVAR 未设置（该脚本应由 fnOS 应用中心调用）}"
+APP_DIR="${TRIM_APPDEST}"
+DATA_DIR="${TRIM_PKGVAR}"
+CONF_DIR="${TRIM_PKGETC:-${DATA_DIR}/etc}"
+
+# 内核与面板资源：兼容 fnpack 打包布局与 target 子目录布局
+res_path() {
+    local rel="$1"
+    for cand in "${APP_DIR}/${rel}" "${APP_DIR}/target/${rel}"; do
+        if [ -e "${cand}" ]; then
+            printf '%s' "${cand}"
+            return 0
+        fi
+    done
+    printf '%s' "${APP_DIR}/${rel}"
+}
+
+MIHOMO_BIN="$(res_path mihomo)"
+UI_DIR="$(res_path ui)"
+
+# 运行时配置（由 wizard/config_callback 写入 DATA_DIR/settings.env）
+MIXED_PORT="${MIHOMO_MIXED_PORT:-7890}"
+API_PORT="${MIHOMO_API_PORT:-9090}"
+UI_PORT="${MIHOMO_UI_PORT:-9092}"
+API_SECRET=""
+SUB_URL=""
+ALLOW_LAN="true"
+if [ -f "${DATA_DIR}/settings.env" ]; then
+    # shellcheck disable=SC1090
+    . "${DATA_DIR}/settings.env" || true
+    MIXED_PORT="${MIHOMO_MIXED_PORT:-$MIXED_PORT}"
+    API_PORT="${MIHOMO_API_PORT:-$API_PORT}"
+    UI_PORT="${MIHOMO_UI_PORT:-$UI_PORT}"
+    API_SECRET="${MIHOMO_API_SECRET:-}"
+    SUB_URL="${MIHOMO_SUBSCRIPTION_URL:-}"
+    ALLOW_LAN="${MIHOMO_ALLOW_LAN:-true}"
+fi
+
+CONFIG_FILE="${DATA_DIR}/config.yaml"
+LOG_FILE="${DATA_DIR}/mihomo.log"
+CORE_PID="${DATA_DIR}/mihomo.pid"
+UI_PID="${DATA_DIR}/ui.pid"
+
+mkdir -p "${DATA_DIR}" 2>/dev/null || true
+
+log() { echo "[$(date '+%F %T')] $*" >> "${LOG_FILE}" 2>/dev/null || true; }
+fail() {
+    # 官方约定：非零退出前把用户可见错误写入 TRIM_TEMP_LOGFILE
+    echo "$*" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+    log "ERROR: $*"
+    exit 1
+}
+
+# ── 订阅拉取：下载并强制修正关键字段 ────────────────────────
+fetch_subscription() {
+    [ -n "${SUB_URL}" ] || return 0
+    [ -x /usr/bin/python3 ] || fail "缺少 python3，无法拉取订阅"
+
+    log "fetching subscription"
+    /usr/bin/python3 - "${SUB_URL}" "${CONFIG_FILE}" "${MIXED_PORT}" "${API_PORT}" "${ALLOW_LAN}" <<'PYEOF' >> "${LOG_FILE}" 2>&1
+import re, sys, urllib.request
+
+url, path, mixed, api, allow_lan = sys.argv[1:6]
+try:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "clash.meta", "Accept": "application/yaml"}
+    )
+    with urllib.request.urlopen(req, timeout=40) as resp:
+        data = resp.read().decode("utf-8", errors="replace")
+except Exception as exc:                      # 网络失败保留旧配置
+    print("fetch failed:", exc)
+    sys.exit(1)
+
+if not data.strip():
+    print("empty subscription")
+    sys.exit(1)
+
+# 订阅里的端口/开关可能与 fnOS 应用设置冲突，这里以应用设置为准强制改写
+def set_kv(text, key, value):
+    pattern = r"(?m)^%s:.*$" % re.escape(key)
+    if re.search(pattern, text):
+        return re.sub(pattern, "%s: %s" % (key, value), text)
+    return text.rstrip() + "\n%s: %s\n" % (key, value)
+
+# ⚠️ 不要在 mixed-port 之外再保留 port / socks-port。
+#    三者若指向同一端口，内核会先绑定 mixed-port，
+#    随后的 "HTTP proxy" / "SOCKS server" 绑定必然失败：
+#        level=error msg="Start SOCKS server error: listen tcp :7890: bind: address already in use"
+#        level=error msg="Start Mixed(http+socks) server error: ... address already in use"
+#    表现就是「HTTP 代理可用但 SOCKS5 被拒绝」，且日志明确报错。
+#    mixed-port 本身已同时提供 HTTP + SOCKS5，故这里直接注释掉冗余项。
+def disable_kv(text, key):
+    pattern = r"(?m)^%s:.*$" % re.escape(key)
+    if re.search(pattern, text):
+        return re.sub(pattern, "# %s: (由 fnOS 应用托管，改用 mixed-port)" % key, text)
+    return text
+
+data = set_kv(data, "mixed-port", mixed)
+data = disable_kv(data, "port")
+data = disable_kv(data, "socks-port")
+data = set_kv(data, "allow-lan", str(allow_lan).lower())
+data = set_kv(data, "external-controller", "'0.0.0.0:%s'" % api)
+
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(data)
+print("subscription written:", len(data), "bytes")
+PYEOF
+    # 订阅拉取失败不应阻塞启动（可能是临时断网）
+    if [ -s "${CONFIG_FILE}" ]; then
+        log "subscription ok"
+    else
+        log "subscription failed, keeping previous config"
+    fi
+}
+
+# ── 首次启动生成最小可用配置 ────────────────────────────────
+ensure_config() {
+    [ -f "${CONFIG_FILE}" ] && return 0
+    cat > "${CONFIG_FILE}" <<EOF
+mixed-port: ${MIXED_PORT}
+allow-lan: ${ALLOW_LAN}
+bind-address: '*'
+mode: rule
+log-level: info
+external-controller: '0.0.0.0:${API_PORT}'
+secret: '${API_SECRET}'
+proxies: []
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: [DIRECT]
+rules:
+  - MATCH,DIRECT
+EOF
+    log "generated minimal config.yaml"
+}
+
+# geo 数据完整性校验。
+#
+# ⚠️ 只看文件大小是不够的：实测事故中随包的 geoip.metadb 是【被截断的下载结果】
+#    （3366912 字节 vs 正确的 8389459 字节），大小检查形同虚设。
+#    MMDB 的元数据标记 "MaxMind.com" 固定在文件尾部，截断文件必然缺失，
+#    因此用标记而非大小判定，可靠且开销极低。
+geodata_ok() {
+    local file="$1" kind="$2" size first
+    [ -s "${file}" ] || return 1
+    case "${kind}" in
+        geoip.metadb)
+            # MMDB 元数据标记固定在文件尾部；截断文件必然缺失。
+            grep -qa 'MaxMind.com' "${file}" 2>/dev/null || return 1
+            ;;
+        geosite.dat)
+            # v2ray dat 是 protobuf，首字节应为 field 1 的 tag 0x0a。
+            # 只查大小会把"截断到 1MB 以上"的坏文件判成好的，故加内容判据。
+            size="$(stat -c %s "${file}" 2>/dev/null || echo 0)"
+            [ "${size}" -gt 1000000 ] || return 1
+            first="$(head -c 1 "${file}" 2>/dev/null | od -An -tu1 2>/dev/null | tr -d ' \n')"
+            [ "${first}" = "10" ] || return 1
+            ;;
+    esac
+    return 0
+}
+
+# 内核自带的下拉逻辑只认 GitHub Release 资产，而该域名在部分网络（含本机实测）
+# 不可达，会一直挂到超时 —— 这正是"启动超时"的直接触发点。
+# 因此这里主动用可达镜像（jsDelivr）补齐，内核就不会再去联网。
+fetch_geodata() {
+    local name="$1" dst url tmp
+    dst="${DATA_DIR}/${name}"
+    tmp="${dst}.part"
+    for url in \
+        "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/${name}" \
+        "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/${name}" \
+        "https://gcore.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/${name}"
+    do
+        # 超时必须显式给死：curl 默认无限等待，内核那次就是卡在这里。
+        if curl -fL --retry 2 -m 120 -o "${tmp}" "${url}" 2>/dev/null && geodata_ok "${tmp}" "${name}"; then
+            mv -f "${tmp}" "${dst}"
+            log "fetched ${name} from mirror ($(stat -c %s "${dst}") 字节)"
+            return 0
+        fi
+        rm -f "${tmp}" 2>/dev/null || true
+    done
+    log "WARN 无法从镜像获取 ${name}，内核可能因缺失 geo 数据启动失败"
+    return 1
+}
+
+# 把随包的 geoip/geosite 复制到内核工作目录。
+#
+# ⚠️ 这一步不能省：内核以 `-d ${DATA_DIR}` 启动，会在【数据目录】里找
+#    geoip.metadb / geosite.dat，而这两个文件随包安装在 ${APP_DIR}。
+#    找不到时内核会尝试联网下载 —— 而此时代理还没起来，必然失败并卡住启动。
+#    （实测：日志出现 "Can't find MMDB, start download" 后启动超时。）
+seed_geodata() {
+    local name src dst
+    for name in geoip.metadb geosite.dat; do
+        src=""
+        for cand in "${APP_DIR}/${name}" "${APP_DIR}/target/${name}"; do
+            [ -f "${cand}" ] && src="${cand}" && break
+        done
+        dst="${DATA_DIR}/${name}"
+
+        # 目标已存在且完整 —— 无需处理。
+        # 注意：即使随包副本损坏，只要数据目录里有一份【校验通过】的，
+        # 也不要被损坏的随包副本覆盖（否则会从"能用"退回"不能启动"）。
+        if geodata_ok "${dst}" "${name}"; then
+            continue
+        fi
+
+        if [ -n "${src}" ] && geodata_ok "${src}" "${name}"; then
+            cp -f "${src}" "${dst}" 2>/dev/null && log "seeded ${name} ($(stat -c %s "${dst}") 字节)"
+            continue
+        fi
+
+        if [ -z "${src}" ]; then
+            log "WARN ${name} 不在安装目录"
+        else
+            log "ERROR 随包 ${name} 校验失败（$(stat -c %s "${src}" 2>/dev/null) 字节），拒绝拷贝"
+        fi
+        # 随包副本不可用 → 走镜像补齐，避免内核自己去 GitHub 挂死
+        fetch_geodata "${name}" || true
+    done
+}
+
+write_secret() {
+    [ -n "${API_SECRET}" ] || return 0
+    /usr/bin/python3 - "${CONFIG_FILE}" "${API_SECRET}" <<'PYEOF' >> "${LOG_FILE}" 2>&1
+import re, sys
+path, secret = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+pattern = r"(?m)^secret:.*$"
+line = "secret: '%s'" % secret
+text = re.sub(pattern, line, text) if re.search(pattern, text) else text.rstrip() + "\n" + line + "\n"
+open(path, "w", encoding="utf-8").write(text)
+PYEOF
+}
+
+pid_alive() {
+    [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+}
+
+read_pid() {
+    [ -f "$1" ] && head -n 1 "$1" | tr -d '[:space:]'
+}
+
+# Clash API 健康检查。
+# ⚠️ 配置了 secret 时 Clash API 会返回 401，因此必须带上 Authorization，
+# 否则健康检查永远失败（会把正常启动误判为超时）。
+api_alive() {
+    if [ -n "${API_SECRET}" ]; then
+        curl -sf -m 2 -H "Authorization: Bearer ${API_SECRET}" \
+            "http://127.0.0.1:${API_PORT}/version" >/dev/null 2>&1
+    else
+        curl -sf -m 2 "http://127.0.0.1:${API_PORT}/version" >/dev/null 2>&1
+    fi
+}
+
+core_running() {
+    local pid
+    pid="$(read_pid "${CORE_PID}")"
+    if pid_alive "${pid}"; then return 0; fi
+    # 兜底：API 已响应也视为运行中
+    api_alive
+}
+
+# 端口被「本应用之外」的进程占用时给出可读错误并退出。
+# 注意：这里只检测、不 kill —— 无条件 fuser -k 会误杀用户的其它服务
+# （实证教训，见 research/verify-network.md 对 mihomo-core 的审查）。
+port_in_use_by_others() {
+    local port="$1" pid=""
+    command -v ss >/dev/null 2>&1 || return 1
+    pid="$(ss -lntp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" {print $NF}' \
+           | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+    [ -n "${pid}" ] || return 1
+    # 属于本应用目录的进程不算冲突
+    if tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -q "${APP_DIR}"; then
+        return 1
+    fi
+    return 0
+}
+
+ui_running() {
+    local pid
+    pid="$(read_pid "${UI_PID}")"
+    if pid_alive "${pid}"; then return 0; fi
+    curl -sf -m 2 "http://127.0.0.1:${UI_PORT}/" >/dev/null 2>&1
+}
+
+start_core() {
+    if core_running; then
+        log "core already running"
+        return 0
+    fi
+
+    # 端口冲突预检：被其它程序的进程占用时直接报错，不抢占、不误杀
+    if port_in_use_by_others "${MIXED_PORT}"; then
+        fail "端口 ${MIXED_PORT} 已被其它程序占用，请在应用设置中改用其它端口。"
+    fi
+    if port_in_use_by_others "${API_PORT}"; then
+        fail "端口 ${API_PORT} 已被其它程序占用，请在应用设置中改用其它端口。"
+    fi
+
+    seed_geodata          # 必须先于内核启动，否则会联网下载 geo 数据而超时
+    ensure_config
+    fetch_subscription
+    write_secret
+
+    log "starting mihomo: ${MIHOMO_BIN} -d ${DATA_DIR}"
+    nohup "${MIHOMO_BIN}" -d "${DATA_DIR}" -f "${CONFIG_FILE}" >> "${LOG_FILE}" 2>&1 &
+    echo "$!" > "${CORE_PID}"
+
+    local i
+    for i in $(seq 1 20); do
+        if api_alive; then
+            log "core ready after ${i}s"
+            return 0
+        fi
+        sleep 1
+    done
+
+    # 超时了：把内核自己报的错捞出来，别让用户只看到笼统的"启动超时"。
+    # 实测最有价值的失败原因（geo 缺失 / 端口占用 / 配置错误）都在这里。
+    local reason
+    reason="$(grep -aE 'level=(error|fatal)' "${LOG_FILE}" 2>/dev/null | tail -3)"
+    if [ -n "${reason}" ]; then
+        fail "Mihomo 内核启动超时。内核报告：${reason}"
+    fi
+    fail "Mihomo 内核启动超时，请查看日志：${LOG_FILE}"
+}
+
+start_ui() {
+    if ui_running; then
+        log "ui already running"
+        return 0
+    fi
+    [ -d "${UI_DIR}" ] || { log "no ui dir, skipping"; return 0; }
+
+    # 统一网关通道：Socket 必须位于 TRIM_APPDEST（官方要求），
+    # 与 app/ui/config 的 gatewaySocket 对应。
+    # 启动前清理陈旧 Socket，否则 bind 会失败。
+    local gw_socket="${APP_DIR}/app.sock"
+    local gw_prefix="/app/${APP_NAME}"
+    # 本应用注册了两个网关入口（主入口 + 状态页），共用同一 Socket。
+    # 服务端按最长前缀优先剥离，这里从长到短列出便于阅读。
+    local gw_prefixes="/app/${APP_NAME}/status,/app/${APP_NAME}"
+    rm -f "${gw_socket}" 2>/dev/null || true
+
+    # 面板静态文件目录（构建时下载到 target/panels）
+    local panels_dir=""
+    for cand in "${APP_DIR}/panels" "${APP_DIR}/target/panels"; do
+        [ -d "${cand}" ] && panels_dir="${cand}" && break
+    done
+
+    # MIHOMO_DATA_DIR 必须传：状态页要从中读取 settings.env 的 API 密钥，
+    # 否则对 Clash API 的请求会 401，状态页永远显示「离线」。
+    MIHOMO_UI_PORT="${UI_PORT}" MIHOMO_API_PORT="${API_PORT}" \
+    MIHOMO_UI_ROOT="${UI_DIR}" MIHOMO_LOG_FILE="${LOG_FILE}" \
+    MIHOMO_DATA_DIR="${DATA_DIR}" \
+    MIHOMO_SOCKET="${gw_socket}" \
+    MIHOMO_GATEWAY_PREFIXES="${gw_prefixes}" \
+    MIHOMO_PANELS_DIR="${panels_dir}" \
+        nohup /usr/bin/python3 "${APP_DIR}/ui_server.py" >> "${LOG_FILE}" 2>&1 &
+    echo "$!" > "${UI_PID}"
+
+    # 就绪判定：状态页默认只开网关 Socket（不监听 TCP）。
+    # 用 --unix-socket 请求一次，确认服务真的在响应。
+    local i
+    for i in $(seq 1 10); do
+        if [ -S "${gw_socket}" ] && \
+           curl -sf -m 2 --unix-socket "${gw_socket}" \
+                "http://localhost${gw_prefix}/" >/dev/null 2>&1; then
+            log "ui ready after ${i}s (gateway socket)"
+            return 0
+        fi
+        sleep 1
+    done
+    log "ui health check timed out"
+    return 0
+}
+
+stop_all() {
+    local pid
+    for pf in "${UI_PID}" "${CORE_PID}"; do
+        pid="$(read_pid "${pf}")"
+        if pid_alive "${pid}"; then
+            kill -TERM "${pid}" 2>/dev/null || true
+            local i
+            for i in 1 2 3 4 5; do
+                pid_alive "${pid}" || break
+                sleep 1
+            done
+            pid_alive "${pid}" && kill -KILL "${pid}" 2>/dev/null || true
+            log "stopped pid ${pid} (${pf##*/})"
+        fi
+        rm -f "${pf}" 2>/dev/null || true
+    done
+
+    # 清理残留内核进程。
+    #
+    # ⚠️ 不能用 `pkill -f "${APP_DIR}/mihomo"`：-f 是【对整条命令行做子串匹配】，
+    #    凡是命令行里含该路径的进程都会被命中 —— 包括调用本脚本的 shell、
+    #    调试用的 bash、以及任何命令行里恰好带上该路径的无关进程。
+    #    实测已把自己所在的外层 shell 一起 SIGTERM 掉。
+    #    改为按 /proc/<pid>/exe 精确比对：只杀真正由本应用内核二进制启动的进程，
+    #    且显式排除自身与父进程。
+    local exe target
+    target="$(readlink -f "${MIHOMO_BIN}" 2>/dev/null || printf '%s' "${MIHOMO_BIN}")"
+    for p in /proc/[0-9]*; do
+        pid="${p#/proc/}"
+        [ "${pid}" = "$$" ] && continue
+        [ "${pid}" = "${PPID}" ] && continue
+        exe="$(readlink -f "${p}/exe" 2>/dev/null)" || continue
+        [ "${exe}" = "${target}" ] || continue
+        kill -TERM "${pid}" 2>/dev/null || true
+        log "reaped stray core pid ${pid}"
+    done
+    rm -f "${APP_DIR}/app.sock" 2>/dev/null || true
+    log "stop complete"
+}
+
+case "${1:-start}" in
+    start)
+        # geo 数据预置放在最前：即使内核判定"已在运行"提前返回，也保证数据就位。
+        # 该函数幂等（大小一致则跳过），重复执行无副作用。
+        seed_geodata
+        start_core
+        start_ui
+        ;;
+    stop)
+        stop_all
+        ;;
+    status)
+        if core_running; then
+            echo "running (mixed=${MIXED_PORT} api=${API_PORT} ui=${UI_PORT})"
+            exit 0
+        fi
+        echo "stopped"
+        exit 3          # 官方约定：3 = 未运行
+        ;;
+    *)
+        fail "未知命令: $1（支持 start|stop|status）"
+        ;;
+esac

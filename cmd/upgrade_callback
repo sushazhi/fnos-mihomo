@@ -1,0 +1,6 @@
+#!/bin/bash
+# 升级后执行：保留用户数据，仅补建目录。
+set -uo pipefail
+DATA_DIR="${TRIM_PKGVAR:-/var/apps/${TRIM_APPNAME:-mihomo}/var}"
+mkdir -p "${DATA_DIR}"
+exit 0

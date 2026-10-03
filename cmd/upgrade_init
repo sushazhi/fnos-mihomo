@@ -1,0 +1,7 @@
+#!/bin/bash
+# 升级前执行：先停止旧进程，避免二进制被占用。
+set -uo pipefail
+if [ -x "${TRIM_APPDEST:-/var/apps/mihomo}/cmd/main" ]; then
+    "${TRIM_APPDEST}/cmd/main" stop >/dev/null 2>&1 || true
+fi
+exit 0

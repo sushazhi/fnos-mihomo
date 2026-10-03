@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mihomo 状态</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f8fa; --card:#fff; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --ok:#1a7f37; --bad:#cf222e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --card:#161b22; --fg:#e6edf3; --muted:#8b949e; --line:#30363d; --ok:#3fb950; --bad:#f85149; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+         font-family: system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:14px; }
+  .row { display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--line); font-size:14px; }
+  .row:last-child { border-bottom:none; }
+  .k { color:var(--muted); }
+  .v { font-variant-numeric: tabular-nums; font-weight:600; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; }
+  .on { background:var(--ok); } .off { background:var(--bad); }
+  .err { color:var(--bad); font-size:13px; }
+  code { background:rgba(127,127,127,.15); padding:2px 6px; border-radius:5px; font-size:12.5px; }
+  button { font:inherit; font-size:13px; padding:7px 14px; border-radius:7px; border:1px solid var(--line);
+           background:var(--card); color:var(--fg); cursor:pointer; }
+  button:hover { border-color: var(--muted); }
+  .foot { color:var(--muted); font-size:12.5px; line-height:1.7; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Mihomo</h1>
+  <div class="sub">fnOS 原生应用 · 状态页</div>
+
+  <div class="card">
+    <div class="row"><span class="k">内核状态</span>
+      <span class="v" id="state"><span class="dot off"></span>检测中…</span></div>
+    <div class="row"><span class="k">内核版本</span><span class="v" id="version">-</span></div>
+    <div class="row"><span class="k">运行模式</span><span class="v" id="mode">-</span></div>
+    <div class="row"><span class="k">节点 / 规则</span><span class="v" id="counts">-</span></div>
+    <div class="row"><span class="k">Clash API</span><span class="v" id="api">-</span></div>
+    <div class="row"><span class="k">混合代理端口</span><span class="v" id="mixed">-</span></div>
+    <div class="row"><span class="k">局域网连接</span><span class="v" id="lan">-</span></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="border-bottom:none">
+      <span class="k">操作</span>
+      <button id="refresh">立即刷新</button>
+    </div>
+  </div>
+
+  <div class="card foot" id="guide"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function setState(online) {
+  $("state").innerHTML = online
+    ? '<span class="dot on"></span>在线'
+    : '<span class="dot off"></span>离线';
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("api/status", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+
+    setState(!!d.online);
+    $("version").textContent = d.version || "-";
+    $("mode").textContent = d.mode || "-";
+    $("api").textContent = ":" + (d.api_port ?? "-");
+    $("mixed").textContent = d.mixed_port ? ":" + d.mixed_port : "-";
+    $("lan").textContent = d.allow_lan === true ? "已开启" : (d.allow_lan === false ? "已关闭" : "-");
+    $("counts").textContent = (d.proxy_count ?? "-") + " / " + (d.rule_count ?? "-");
+
+    // 面板/代理地址要指向 NAS 的**局域网 IP**。
+    // 走统一网关时 location.hostname 是访问域名（可能是反代/HTTPS 域名），
+    // 拿它拼 :9090 / :7890 常常不可达 —— 因此优先用服务端探测的真实 IP。
+    const host = d.lan_ip || location.hostname;
+
+    $("guide").innerHTML = d.online
+      ? '内核已就绪。使用面板连接 <code>http://' + host + ':' + d.api_port +
+        '</code> 管理节点与规则。<br>局域网设备请将 HTTP/SOCKS 代理指向 <code>' +
+        host + ':' + (d.mixed_port || "-") + '</code>。'
+      : '内核未运行。请在 fnOS 应用中心确认 Mihomo 已启动，并检查应用设置中的订阅链接。';
+  } catch (err) {
+    setState(false);
+    $("guide").innerHTML = '<span class="err">无法读取状态：' + err.message + '</span>';
+  }
+}
+
+$("refresh").addEventListener("click", refresh);
+refresh();
+setInterval(refresh, 5000);
+</script>
+<!-- 右下角「切换面板」浮动入口。脚本由 ui_server.py 提供（Cache-Control: no-cache），
+     并从自身 URL 反推应用前缀，因此本页在 /index.html、/status/ 等地址下都可用。 -->
+<script src="panel-switch.js" defer></script>
+</body>
+</html>

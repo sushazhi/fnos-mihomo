@@ -1,0 +1,61 @@
+[
+  {
+    "stepTitle": "Mihomo 基础配置",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "安装后 Mihomo 将作为 fnOS 应用随系统自启。<br>订阅链接可稍后在「应用设置」中填写，填好后重启应用即生效。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_mixed_port",
+        "label": "混合代理端口",
+        "initValue": "7890",
+        "helpText": "HTTP / SOCKS5 混合端口，局域网设备将代理指向此端口",
+        "rules": [
+          { "required": true, "message": "请输入端口" },
+          { "pattern": "^[0-9]+$", "message": "必须是数字" },
+          { "min": 1, "max": 65535, "message": "端口范围 1-65535" }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_api_port",
+        "label": "Clash API 端口",
+        "initValue": "9090",
+        "helpText": "External Controller 端口，面板与状态页通过它控制内核",
+        "rules": [
+          { "required": true, "message": "请输入端口" },
+          { "pattern": "^[0-9]+$", "message": "必须是数字" },
+          { "min": 1, "max": 65535, "message": "端口范围 1-65535" }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "wizard_api_secret",
+        "label": "API 密钥",
+        "initValue": "",
+        "helpText": "面板连接密钥，请设置为强密码。留空则自动生成随机密钥",
+        "rules": [
+          { "min": 4, "message": "至少 4 位" }
+        ]
+      }
+    ]
+  },
+  {
+    "stepTitle": "订阅（可跳过）",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "填写机场/自建订阅链接后，Mihomo 启动时会自动拉取节点与规则。<br>留空也可以，之后在「应用设置」里补充。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_subscription_url",
+        "label": "订阅链接",
+        "initValue": "",
+        "helpText": "支持 Clash / Mihomo YAML 订阅。密钥会写入应用数据目录，不会记录到日志"
+      }
+    ]
+  }
+]

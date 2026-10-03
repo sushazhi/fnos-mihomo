@@ -1,0 +1,19 @@
+#!/bin/bash
+# 卸载前执行：停止进程；按 wizard/uninstall 的选择处理数据。
+set -uo pipefail
+
+DATA_DIR="${TRIM_PKGVAR:-/var/apps/${TRIM_APPNAME:-mihomo}/var}"
+
+if [ -x "${TRIM_APPDEST:-/var/apps/mihomo}/cmd/main" ]; then
+    "${TRIM_APPDEST}/cmd/main" stop >/dev/null 2>&1 || true
+fi
+
+case "${wizard_data_action:-keep}" in
+    delete)
+        rm -rf "${DATA_DIR}" 2>/dev/null || true
+        ;;
+    keep|*)
+        : # 保留用户数据
+        ;;
+esac
+exit 0

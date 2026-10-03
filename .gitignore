@@ -1,0 +1,30 @@
+# 构建产物
+*.fpk
+*.fpk.sha256
+
+# 构建时下载的内核与 geo 数据（不入库，由 build.py 拉取）
+app/mihomo
+app/geoip.metadb
+app/geosite.dat
+
+# 构建时下载的面板静态文件（约 13MB，不入库）。
+# ⚠️ 只忽略两个面板**子目录**，不要写成 `app/panels/` ——
+#    那会连同目录下**手工维护**的 chooser.html 一起忽略掉，导致全新 clone
+#    里没有该文件：build.py 的 `if os.path.exists(chooser)` 会静默跳过，
+#    包能构建成功但缺面板选择页（serve_chooser 退化成状态页）。
+#    chooser.html 因此天然被跟踪，无需再写 `!` 反选 —— 写了反而会让
+#    `git check-ignore` 把它报成 ignored，容易误导。
+app/panels/metacubexd/
+app/panels/zashboard/
+
+# 本地构建缓存（fnpack / 内核 / geo / 面板，不入库）
+.local-build/
+
+# 本地测试用配置（可能含订阅链接/密钥）
+config.env
+*.local.env
+
+# 系统与编辑器
+.DS_Store
+*.swp
+__pycache__/

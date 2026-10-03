@@ -1,0 +1,149 @@
+name: Build mihomo fpk
+
+# 这个 workflow 既能被 push tag / 手动直接触发，也能被
+# auto-update.yml（每周检查）通过 workflow_call 复用。
+# 复用时不重复实现一遍构建逻辑 —— 只此一份，避免两处漂移。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（留空则用 tag 或 manifest）"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      version:
+        description: "版本号（由调用方给出，通常是内核版本）"
+        required: false
+        type: string
+        default: ""
+
+# contents: write —— release job 需要建 tag / 发 Release；
+# 被 auto-update.yml 复用时不改仓库内容，只读 + 发 Release。
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        name: 解析版本号
+        # 优先级：workflow_call 传入 > tag > manifest
+        env:
+          IN_CALL: ${{ inputs.version }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT}" == "push" && "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF##*/v}"
+          elif [ -n "${IN_CALL}" ]; then
+            VER="${IN_CALL}"
+          else
+            VER="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' manifest | head -1 | tr -d ' ')"
+          fi
+          [ -n "${VER}" ] || { echo "无法解析版本号"; exit 1; }
+          # 包版本约定为裸数字（飞牛 manifest 要求裸数字点分），tag 用 v 前缀
+          VER="${VER#v}"
+          echo "version=${VER}" | tee -a "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            runner: ubuntu-24.04
+          - arch: arm
+            runner: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 显示环境
+        run: uname -m
+
+      # 不再需要「安装 fnpack」步骤：build.py 会自行下载官方 fnpack 并按
+      # 开发机平台缓存到 .local-build/（含 ARM 文件名 -linux-arm 的探测逻辑）。
+      # 用 setup-python 固定解释器，避免 runner 默认版本漂移。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 构建并打包
+        run: python build.py --arch "${{ matrix.arch }}" --version "${VERSION}"
+
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          # 产物必须存在、非空、且 sha256 对得上，避免上传一个坏包
+          ls -l mihomo-*.fpk
+          for f in mihomo-*.fpk; do
+            test -s "$f"
+            sha256sum -c "${f}.sha256"
+          done
+
+      - name: 冒烟验证：包内 cmd/* 必须是可执行的
+        run: |
+          set -euo pipefail
+          # Windows 版 fnpack 会把文件写成 0666，build.py 负责修正。
+          # 这里独立复核一次：Linux 上打包本应天然 0755，若这条挂了说明
+          # 权限修正逻辑回归了。
+          python - <<'PY'
+          import glob, gzip, io, tarfile
+          fpk = glob.glob("mihomo-*.fpk")[0]
+          t = tarfile.open(fileobj=io.BytesIO(gzip.open(fpk, "rb").read()))
+          bad = [m.name for m in t.getmembers()
+                 if m.name.startswith("cmd/") and not (m.mode & 0o111)]
+          assert not bad, "cmd/* 缺执行位: %s" % bad
+          print("cmd/* 执行位 OK:", len([m for m in t.getmembers()
+                if m.name.startswith("cmd/")]), "个")
+          PY
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-fpk-${{ matrix.arch }}
+          path: |
+            mihomo-*.fpk
+            mihomo-*.fpk.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  # 发布条件（与旧行为对比要小心）：
+  #   - 推 v* tag          → 发 Release（原有行为）
+  #   - workflow_call 复用 → 发 Release（auto-update 只在检测到更新后才调用）
+  #   - workflow_dispatch 手动 → **不发**，只出 artifact，方便先试包
+  # tag 唯一性即去重：调用方（auto-update.yml）在调用前先判定该 tag 不存在，
+  # 所以这里不需要、也无法再判断一次。
+  release:
+    needs: [build, version]
+    runs-on: ubuntu-latest
+    if: >-
+      startsWith(github.ref, 'refs/tags/v*') ||
+      github.event_name == 'workflow_call'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/mihomo-*.fpk*
+          # 复用模式下由调用方传 tag；tag 推送模式下用解析出的 tag
+          tag_name: ${{ needs.version.outputs.tag }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
