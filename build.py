@@ -11,7 +11,12 @@ build.py - mihomo fnOS 应用统一打包脚本（跨平台，取代了早期的
 版本号策略:
     - 默认 **包版本 = 内核版本**：取 GitHub `/releases/latest` 的 tag，
       去掉 `v` 前缀后作为 manifest 的 version（`v1.19.32` → `1.19.32`），
-      最终产物即 `mihomo-1.19.32-x86.fpk`。
+      最终产物即 `mihomo-1.19.32-amd64.fpk`。
+
+架构命名（详见 ARCH_MAP 注释）:
+    --arch 传 `x86` / `arm`（CLI 与 manifest 的口径），
+    产物文件名后缀用 `amd64` / `arm64`，与飞牛官方发布命名一致。
+    ⚠️ manifest 的 platform 字段**只能**是 x86 / arm / all（官方枚举）。
     - `--version` 显式指定时以它为准。
     - 内核版本取不到（离线）或 tag 不是数字版本（如 `alpha-xxxx`）时，
       回退读 manifest 里手写的 version。见 kernel_version_to_app_version。
@@ -119,9 +124,17 @@ RULES_API = "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/late
 # 目标架构映射。
 # 与 fnos-qbittorrent 不同：mihomo 的 fpk **分架构出包**，因为内核是各架构
 # 独立的 ELF，必须与 manifest 的 platform 严格对应。
+#
+# ⚠️ 这里有**四套命名并存**，分别由不同外部规范决定，**不要试图统一**：
+#   pkg      —— 产物文件名后缀，用 amd64 / arm64（与飞牛官方发布 fnpack 的
+#               命名一致：fnpack-1.2.3-linux-amd64 / -linux-arm64）
+#   mihomo   —— mihomo 上游 release 资产名，Go 惯例 amd64 / arm64
+#   manifest —— 飞牛 platform 字段，官方 Manifest 文档只认 x86 / arm / all
+#               （填 amd64/arm64 是**非法值**，应用中心识别不了架构）
+#   elf      —— ELF 机器码字符串，内核架构校验用
 ARCH_MAP = {
-    "x86": {"mihomo": "amd64", "manifest": "x86", "elf": "x86-64"},
-    "arm": {"mihomo": "arm64", "manifest": "arm", "elf": "aarch64"},
+    "x86": {"pkg": "amd64", "mihomo": "amd64", "manifest": "x86", "elf": "x86-64"},
+    "arm": {"pkg": "arm64", "mihomo": "arm64", "manifest": "arm", "elf": "aarch64"},
 }
 
 
@@ -1378,7 +1391,7 @@ def build_fpk(force):
     # Windows 上 fnpack 把所有文件写成 0666（无执行位），必须修
     fix_fpk_permissions(out_cache)
 
-    final_name = "mihomo-%s-%s.fpk" % (APP_VERSION, APP_ARCH)
+    final_name = "mihomo-%s-%s.fpk" % (APP_VERSION, info["pkg"])
     final_path = os.path.join(PROJECT_DIR, final_name)
     if os.path.exists(final_path):
         os.remove(final_path)
@@ -1425,8 +1438,8 @@ def main():
     log("========================================")
     log("  fnOS mihomo - 构建")
     log("  开发机：  %s/%s" % (get_platform(), get_platform_arch()))
-    log("  目标架构：%s（内核 %s，platform=%s）"
-        % (APP_ARCH, info["mihomo"], info["manifest"]))
+    log("  目标架构：%s（内核 %s，platform=%s，产物后缀 %s）"
+        % (APP_ARCH, info["mihomo"], info["manifest"], info["pkg"]))
     log("========================================")
 
     # ── 版本号与 stage 的先后顺序（踩过坑，别随手调换）─────────────

@@ -88,10 +88,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # arch —— 传给 build.py --arch，取值 x86 / arm（manifest 的口径）
+        # pkg  —— 产物文件名后缀与 artifact 名，用 amd64 / arm64，
+        #         与飞牛官方发布命名（fnpack-*-amd64 / -arm64）一致
         include:
           - arch: x86
+            pkg: amd64
             runner: ubuntu-24.04
           - arch: arm
+            pkg: arm64
             runner: ubuntu-24.04-arm
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -141,7 +146,7 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v7
         with:
-          name: mihomo-fpk-${{ matrix.arch }}
+          name: mihomo-fpk-${{ matrix.pkg }}
           path: |
             mihomo-*.fpk
             mihomo-*.fpk.sha256

@@ -21,11 +21,11 @@
 
 ```bash
 # 1. 构建（自动下载 fnpack / mihomo 内核 / geo 数据 / 两个面板）
-python build.py --arch x86                      # → mihomo-1.19.32-x86.fpk (+ .sha256)
-python build.py --arch arm                      # → mihomo-1.19.32-arm.fpk
+python build.py --arch x86                      # → mihomo-1.19.32-amd64.fpk (+ .sha256)
+python build.py --arch arm                      # → mihomo-1.19.32-arm64.fpk
 
 # 2. 安装到 fnOS 测试机
-appcenter-cli install-fpk mihomo-1.19.32-x86.fpk
+appcenter-cli install-fpk mihomo-1.19.32-amd64.fpk
 appcenter-cli start mihomo
 ```
 
@@ -43,7 +43,7 @@ appcenter-cli start mihomo
 `/releases/latest` tag，去掉 `v` 前缀后写进 manifest 的 `version`：
 
 ```
-内核 tag v1.19.32  →  manifest version = 1.19.32  →  mihomo-1.19.32-x86.fpk
+内核 tag v1.19.32  →  manifest version = 1.19.32  →  mihomo-1.19.32-amd64.fpk
 ```
 
 - `python build.py --version 1.0.7` 可显式覆盖，以你给的为准。
@@ -94,7 +94,7 @@ wizard_api_secret=your-strong-secret
 wizard_subscription_url=https://example.com/sub
 wizard_allow_lan=true
 EOF
-appcenter-cli install-fpk mihomo-1.19.32-x86.fpk --env config.env
+appcenter-cli install-fpk mihomo-1.19.32-amd64.fpk --env config.env
 ```
 
 > `config.env` 含密钥，**不要提交到版本库**。
@@ -298,6 +298,13 @@ MIHOMO_UI_BIND=127.0.0.1   # 默认 0.0.0.0
   实测数据见 `research/verify-network.md` 文末（两者均不随本仓库分发）。
 - **默认架构相关**：为避免装错架构，`platform` 分 x86 / arm 分别打包，
   不使用 `all`。
+- **架构命名有两层，别弄混**：`manifest` 的 `platform` 字段**只能**是
+  `x86` / `arm` / `all`（飞牛官方 Manifest 文档的枚举值，填 `amd64`/`arm64`
+  是非法值，会导致应用中心识别不了架构、装错包）。而**产物文件名**用
+  `amd64` / `arm64`，与飞牛官方发布命名（`fnpack-1.2.3-linux-amd64` /
+  `-linux-arm64`）一致 —— `arm` 太含糊（armv7 还是 arm64 分不清）。
+  CLI 的 `--arch` 参数取值仍是 `x86` / `arm`。
+  **不要**把 `manifest` 的 `platform` 改成 `amd64`/`arm64`。
 
 ## 许可
 
