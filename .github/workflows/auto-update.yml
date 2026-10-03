@@ -40,13 +40,13 @@ jobs:
       mcx: ${{ steps.probe.outputs.metacubexd }}
       zash: ${{ steps.probe.outputs.zashboard }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # 默认浅克隆即可：判重靠仓库里的 scripts/pinned-versions.json，
           # 不再依赖本地 tag 列表。
           fetch-depth: 1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

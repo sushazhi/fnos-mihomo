@@ -32,7 +32,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: resolve
         name: 解析版本号
         # 优先级：workflow_call 传入 > tag > manifest
@@ -68,7 +68,7 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 显示环境
         run: uname -m
@@ -76,7 +76,7 @@ jobs:
       # 不再需要「安装 fnpack」步骤：build.py 会自行下载官方 fnpack 并按
       # 开发机平台缓存到 .local-build/（含 ARM 文件名 -linux-arm 的探测逻辑）。
       # 用 setup-python 固定解释器，避免 runner 默认版本漂移。
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -111,7 +111,7 @@ jobs:
           PY
 
       - name: 上传产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mihomo-fpk-${{ matrix.arch }}
           path: |
@@ -133,13 +133,13 @@ jobs:
       startsWith(github.ref, 'refs/tags/v*') ||
       github.event_name == 'workflow_call'
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
       - name: 发布 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/mihomo-*.fpk*
           # 复用模式下由调用方传 tag；tag 推送模式下用解析出的 tag
