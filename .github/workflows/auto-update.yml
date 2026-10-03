@@ -186,6 +186,11 @@ jobs:
     uses: ./.github/workflows/build-fpk.yml
     with:
       version: ${{ needs.check.outputs.version }}
+      # 显式要求发布：不要依赖被复用 workflow 里的默认值。
+      # ⚠️ 被复用的 workflow 里 github.event_name 是本 workflow 的触发事件
+      #    （schedule / workflow_dispatch），**不是** 'workflow_call'；
+      #    任何「event_name == 'workflow_call' 才发布」的写法都会失效。
+      publish: true
     # 让被复用 workflow 里的 secrets 可用（GITHUB_TOKEN 是自动注入的，无需声明；
     # 若将来加了别的 secret，在这里 inherit 即可）
     secrets: inherit

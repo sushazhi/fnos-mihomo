@@ -12,6 +12,11 @@ on:
         description: "版本号（留空则用 tag 或 manifest）"
         required: false
         default: ""
+      publish:
+        description: "是否发布 Release（关掉则只出 artifact，方便先试包）"
+        required: false
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       version:
@@ -19,6 +24,11 @@ on:
         required: false
         type: string
         default: ""
+      publish:
+        description: "是否发布 Release（调用方按自身判定传入）"
+        required: false
+        type: boolean
+        default: true
 
 # contents: write —— release job 需要建 tag / 发 Release；
 # 被 auto-update.yml 复用时不改仓库内容，只读 + 发 Release。
@@ -31,6 +41,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
     steps:
       - uses: actions/checkout@v7
       - id: resolve
@@ -39,6 +50,12 @@ jobs:
         env:
           IN_CALL: ${{ inputs.version }}
           EVENT: ${{ github.event_name }}
+          # ⚠️ 不要用 github.event_name == 'workflow_call' 判断「是否被复用」：
+          #    被复用的 workflow 里 event_name 是**最外层**触发事件
+          #    （schedule / workflow_dispatch / push），永远不是 'workflow_call'。
+          #    曾经据此写 if，导致 release job 被静默跳过、从不发 Release。
+          #    现在改为显式入参（缺失则按事件推断）。
+          IN_PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
           if [[ "${EVENT}" == "push" && "${GITHUB_REF}" == refs/tags/v* ]]; then
@@ -53,6 +70,17 @@ jobs:
           VER="${VER#v}"
           echo "version=${VER}" | tee -a "$GITHUB_OUTPUT"
           echo "tag=v${VER}" | tee -a "$GITHUB_OUTPUT"
+
+          # 是否发 Release：
+          #   push tag → 是（原有行为）
+          #   其余（workflow_call / workflow_dispatch）→ 看显式入参 publish，
+          #     入参缺失时默认为 true（发布），与旧「复用即发布」的意图一致。
+          if [[ "${EVENT}" == "push" ]]; then
+            PUB="true"
+          else
+            PUB="${IN_PUBLISH:-true}"
+          fi
+          echo "publish=${PUB}" | tee -a "$GITHUB_OUTPUT"
 
   build:
     needs: version
@@ -123,15 +151,17 @@ jobs:
   # 发布条件（与旧行为对比要小心）：
   #   - 推 v* tag          → 发 Release（原有行为）
   #   - workflow_call 复用 → 发 Release（auto-update 只在检测到更新后才调用）
-  #   - workflow_dispatch 手动 → **不发**，只出 artifact，方便先试包
-  # tag 唯一性即去重：调用方（auto-update.yml）在调用前先判定该 tag 不存在，
-  # 所以这里不需要、也无法再判断一次。
+  #   - workflow_dispatch 手动 → 默认发 Release；若 dispatch 时把 publish 关掉，
+  #                              则只出 artifact，方便先试包
+  #
+  # ⚠️ 曾经这里写的是 github.event_name == 'workflow_call'，这是**错的**：
+  #    被复用的 workflow 里 event_name 是最外层触发事件（schedule 等），
+  #    永远不等于 'workflow_call'，于是 release job 被静默跳过、从不发 Release。
+  #    现改为读 version job 解析出的 publish 输出，语义显式、不依赖事件魔法。
   release:
     needs: [build, version]
     runs-on: ubuntu-latest
-    if: >-
-      startsWith(github.ref, 'refs/tags/v*') ||
-      github.event_name == 'workflow_call'
+    if: ${{ needs.version.outputs.publish == 'true' && needs.build.result == 'success' }}
     steps:
       - uses: actions/download-artifact@v8
         with:
