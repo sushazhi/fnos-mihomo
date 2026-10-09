@@ -1391,7 +1391,9 @@ def build_fpk(force):
     # Windows 上 fnpack 把所有文件写成 0666（无执行位），必须修
     fix_fpk_permissions(out_cache)
 
-    final_name = "mihomo-%s-%s.fpk" % (APP_VERSION, info["pkg"])
+    # ⚠️ 这里**不能**用 main() 里的局部变量 info —— build_fpk 是独立函数，
+    #    看不到它。必须走模块级 APP_ARCH + ARCH_MAP（与 verify_stage 同口径）。
+    final_name = "mihomo-%s-%s.fpk" % (APP_VERSION, ARCH_MAP[APP_ARCH]["pkg"])
     final_path = os.path.join(PROJECT_DIR, final_name)
     if os.path.exists(final_path):
         os.remove(final_path)
