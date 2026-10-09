@@ -1,5 +1,5 @@
 appname               = mihomo
-version = 1.0.6
+version = 1.19.32
 display_name          = Mihomo
 desc                  = Mihomo（Clash Meta）代理内核 fnOS 原生应用：开机自启，混合代理端口 + Clash API + 内置控制面板。
 platform                   = all

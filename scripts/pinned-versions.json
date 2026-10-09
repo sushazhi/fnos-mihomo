@@ -17,8 +17,8 @@
     "   若这里先填了 kernel 却空着面板版本，会被算成「面板有变化」，",
     "   从而多出一个没必要的 1.19.32.1 发布。"
   ],
-  "kernel": "",
-  "metacubexd": "",
-  "zashboard": "",
+  "kernel": "1.19.32",
+  "metacubexd": "1.273.1",
+  "zashboard": "3.29.1",
   "panel_seq": 0
 }
