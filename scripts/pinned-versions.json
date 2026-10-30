@@ -19,6 +19,6 @@
   ],
   "kernel": "1.19.33",
   "metacubexd": "1.273.1",
-  "zashboard": "3.29.1",
-  "panel_seq": 0
+  "zashboard": "3.30.0",
+  "panel_seq": 1
 }
