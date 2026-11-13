@@ -1,0 +1,12 @@
+# 换行符策略：一律 LF。
+#
+# 为什么要显式写死：
+#   开发机在 Windows，全局 core.autocrlf=true —— 每次 checkout/rebase 都会把工作区
+#   文本转成 CRLF。而本仓库有两类"怕 CRLF"的东西：
+#     1) cmd/* 是 bash 脚本，CRLF 会让 NAS 上直接 `bad interpreter: /bin/bash^M`；
+#     2) build.py → fnpack 打包取的是**工作区**内容，于是打出来的包带着 CRLF 一起进
+#        NAS，装完起不来。实测 2026-11-13：一次 rebase 就把 cmd/main 变 CRLF，
+#        tests 的 H1（写入方单引号契约）立刻红——它是靠 `$` 行尾锚点才抓到的。
+#
+# 所以：文本文件统一按 LF 检出，二进制由 text=auto 自动识别、不做转换。
+* text=auto eol=lf
