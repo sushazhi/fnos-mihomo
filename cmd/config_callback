@@ -3,16 +3,22 @@
 #
 # 向导字段以同名环境变量传入（无 TRIM_ 前缀）。
 # 留空语义：订阅链接 / API 密钥留空表示「保持现有值不变」，避免把已配置的密钥清空。
+# Cloudflare 优选：地址与域名同为「留空=保持现有」，地址填 off / - 表示整项关闭。
 set -uo pipefail
 
 APP_NAME="${TRIM_APPNAME:-mihomo}"
 DATA_DIR="${TRIM_PKGVAR:-/var/apps/${APP_NAME}/var}"
 SETTINGS="${DATA_DIR}/settings.env"
+# 与 cmd/main 同一口径：cfopt.py 在应用安装目录里
+CFOPT_PY="${TRIM_APPDEST:-/var/apps/${APP_NAME}/target}/cfopt.py"
 
 mkdir -p "${DATA_DIR}"
 
 # 读取现有值作为回退
 old_mixed=""; old_api=""; old_secret=""; old_sub=""; old_lan=""
+old_cfurl=""; old_cfdom=""; old_cfint=""
+old_cfsrc=""; old_cfcidrs=""; old_cfsni=""; old_cfcand=""; old_cfconc=""; old_cfspeed=""
+old_cfto=""
 if [ -f "${SETTINGS}" ]; then
     # shellcheck disable=SC1090
     . "${SETTINGS}" || true
@@ -21,6 +27,16 @@ if [ -f "${SETTINGS}" ]; then
     old_secret="${MIHOMO_API_SECRET:-}"
     old_sub="${MIHOMO_SUBSCRIPTION_URL:-}"
     old_lan="${MIHOMO_ALLOW_LAN:-}"
+    old_cfurl="${MIHOMO_CFOPT_URL:-}"
+    old_cfdom="${MIHOMO_CFOPT_DOMAINS:-}"
+    old_cfint="${MIHOMO_CFOPT_INTERVAL:-}"
+    old_cfsrc="${MIHOMO_CFOPT_SOURCE:-}"
+    old_cfcidrs="${MIHOMO_CFOPT_CIDRS:-}"
+    old_cfsni="${MIHOMO_CFOPT_SNI:-}"
+    old_cfcand="${MIHOMO_CFOPT_CANDIDATES:-}"
+    old_cfconc="${MIHOMO_CFOPT_CONC:-}"
+    old_cfspeed="${MIHOMO_CFOPT_SPEEDTEST:-}"
+    old_cfto="${MIHOMO_CFOPT_TIMEOUT_MS:-}"
 fi
 
 mixed="${wizard_mixed_port:-${old_mixed:-7890}}"
@@ -28,9 +44,116 @@ api="${wizard_api_port:-${old_api:-9090}}"
 secret="${wizard_api_secret:-}"
 sub="${wizard_subscription_url:-}"
 lan="${wizard_allow_lan:-${old_lan:-true}}"
+cfurl="${wizard_cfopt_url:-}"
+# ⚠️ 字段名必须同时认两个：向导（wizard/config）暴露的是 `wizard_cfopt_domain_add`，
+# 而早期版本/手工设置用的是 `wizard_cfopt_domains`。只认后者会让「追加优选域名」
+# 这条路径**永远静默失效**（表单填了也不会进清单；实测 2026-11-13 真机踩过）。
+cfdom="${wizard_cfopt_domain_add:-${wizard_cfopt_domains:-}}"
+cfint="${wizard_cfopt_interval:-${old_cfint:-24}}"
+# 内置测速相关：留空=保持现有，因此用 ${var:-${old:-默认}} 兜底
+cfsrc="${wizard_cfopt_source:-${old_cfsrc:-url}}"
+cfcidrs="${wizard_cfopt_cidrs:-${old_cfcidrs:-}}"
+cfsni="${wizard_cfopt_sni:-${old_cfsni:-speed.cloudflare.com}}"
+cfcand="${wizard_cfopt_candidates:-${old_cfcand:-400}}"
+cfconc="${wizard_cfopt_conc:-${old_cfconc:-48}}"
+cfspeed="${wizard_cfopt_speedtest:-${old_cfspeed:-false}}"
+cfcto="${wizard_cfopt_timeout:-${old_cfto:-1500}}"
 
 [ -n "${secret}" ] || secret="${old_secret}"
 [ -n "${sub}" ] || sub="${old_sub}"
+
+# ── Cloudflare 优选：留空=保持现有；地址填 off/- 则整项关闭 ──
+cfopt_off=0
+case "${cfurl}" in
+    off|OFF|Off|none|NONE|-) cfopt_off=1 ;;
+esac
+if [ "${cfopt_off}" = "1" ]; then
+    cfurl=""; cfdom=""
+else
+    [ -n "${cfurl}" ] || cfurl="${old_cfurl}"
+    case "${cfdom}" in
+        -|none|NONE) cfdom="" ;;          # 只清空域名，保留地址
+        "")          cfdom="${old_cfdom}" ;;   # 留空 = 保持现有
+    esac
+fi
+
+# 域名列表：去掉空白后只允许域名字符，防止写进 settings.env 时破坏语法
+cfdom="$(printf '%s' "${cfdom}" | tr -d '[:space:]')"
+if [ -n "${cfdom}" ]; then
+    case "${cfdom}" in
+        *[!A-Za-z0-9.+*,_-]*)
+            echo "域名列表只允许字母、数字、点、横线、加号、星号、逗号：${cfdom}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+            exit 1
+            ;;
+    esac
+fi
+
+# 优选地址：必须是 http(s)，且不能含空格/单引号
+# （settings.env 里用单引号包裹该值，含单引号会破坏语法）
+if [ -n "${cfurl}" ]; then
+    case "${cfurl}" in
+        *"'"*)
+            echo "优选地址不能包含单引号：${cfurl}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+    esac
+    case "${cfurl}" in
+        *[[:space:]]*)
+            echo "优选地址不能包含空格：${cfurl}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+    esac
+    case "${cfurl}" in
+        http://*|https://*) ;;
+        *)
+            echo "优选地址必须以 http:// 或 https:// 开头：${cfurl}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+    esac
+fi
+
+# 刷新间隔：0 表示只在应用启动时注入一次，不启定时刷新
+case "${cfint}" in
+    ''|*[!0-9]*)
+        echo "刷新间隔必须是非负整数（小时）：${cfint}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+esac
+if [ "${cfint}" -gt 720 ]; then
+    echo "刷新间隔超出范围 0-720 小时：${cfint}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1
+fi
+
+# ── 内置测速参数校验 ──
+case "${cfsrc}" in
+    url|measure) ;;
+    *) echo "优选来源只能是 url 或 measure：${cfsrc}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+esac
+
+cfcidrs="$(printf '%s' "${cfcidrs}" | tr -d '[:space:]')"
+if [ -n "${cfcidrs}" ]; then
+    case "${cfcidrs}" in
+        *[!0-9A-Fa-f:./,]*)
+            echo "候选网段只允许数字、a-f、冒号、点、斜杠、逗号：${cfcidrs}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+    esac
+fi
+
+case "${cfsni}" in
+    *[!A-Za-z0-9.-]*|"")
+        echo "测速域名（SNI）只能填域名（字母、数字、点、横线）：${cfsni}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+esac
+
+for v in "${cfcand}" "${cfconc}" "${cfcto}"; do
+    case "${v}" in
+        ''|*[!0-9]*) echo "内置测速的数量必须是数字：${v}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+    esac
+done
+if [ "${cfcand}" -lt 1 ] || [ "${cfcand}" -gt 5000 ]; then
+    echo "候选 IP 数量超出范围 1-5000：${cfcand}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1
+fi
+if [ "${cfconc}" -lt 1 ] || [ "${cfconc}" -gt 256 ]; then
+    echo "测速并发数超出范围 1-256：${cfconc}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1
+fi
+if [ "${cfcto}" -lt 100 ] || [ "${cfcto}" -gt 10000 ]; then
+    echo "单 IP 超时超出范围 100-10000 毫秒：${cfcto}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1
+fi
+
+# switch 字段只接受 true/false；其它值一律按关闭处理
+case "${cfspeed}" in
+    true|false) ;;
+    *) cfspeed="false" ;;
+esac
 
 # 端口必须是数字且落在合法区间
 for p in "${mixed}" "${api}"; do
@@ -47,16 +170,55 @@ if [ -z "${secret}" ]; then
     secret="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)"
 fi
 
+# 订阅链接与密钥都会被写进 settings.env，而 cmd/main 会 `. settings.env` 读它。
+# 下面一律用单引号包裹这两个值 —— 不加引号时，用户在订阅链接里填
+# `https://s/$(touch X)` 会在 source 的那一刻被真正执行（实测可复现）。
+# 代价是值里不能再含单引号，所以先拒绝。
+for v in "${sub}" "${secret}"; do
+    case "${v}" in
+        *"'"*) echo "订阅链接/API 密钥不能包含单引号：${v}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+    esac
+done
+case "${sub}" in
+    *[[:space:]]*) echo "订阅链接不能包含空白字符：${sub}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"; exit 1 ;;
+esac
+
 umask 077
+# 说明：优选地址用单引号包裹。这个值来自用户输入，可能含 ; & | $ 等字符，
+# 不加引号会在 . settings.env 时被当成命令执行。
+# ⚠️ 域名清单**不再写进 settings.env**：它是数据不是设置（向导 text 字段上限 1023
+# 字节，79 个域名就 929 字节；且表单提交是整份替换，会被浏览器自动填充的旧值冲掉）。
+# 现在清单存在 ${DATA_DIR}/cfopt-domains.txt，本脚本只做「追加」。
 cat > "${SETTINGS}" <<SETTINGS_EOF
 MIHOMO_MIXED_PORT=${mixed}
 MIHOMO_API_PORT=${api}
 MIHOMO_UI_PORT=9092
-MIHOMO_API_SECRET=${secret}
-MIHOMO_SUBSCRIPTION_URL=${sub}
+MIHOMO_API_SECRET='${secret}'
+MIHOMO_SUBSCRIPTION_URL='${sub}'
 MIHOMO_ALLOW_LAN=${lan}
+MIHOMO_CFOPT_URL='${cfurl}'
+MIHOMO_CFOPT_INTERVAL=${cfint}
+MIHOMO_CFOPT_SOURCE='${cfsrc}'
+MIHOMO_CFOPT_CIDRS='${cfcidrs}'
+MIHOMO_CFOPT_SNI='${cfsni}'
+MIHOMO_CFOPT_CANDIDATES=${cfcand}
+MIHOMO_CFOPT_CONC=${cfconc}
+MIHOMO_CFOPT_TIMEOUT_MS=${cfcto}
+MIHOMO_CFOPT_SPEEDTEST='${cfspeed}'
 SETTINGS_EOF
 chmod 600 "${SETTINGS}"
+
+# 把本次填写的域名**追加**进清单文件（不删除已有条目 —— 这样即使表单里带回旧值，
+# 也最多是重复添加，而不会像以前那样把整份清单冲掉）。
+CFOPT_DOMAINS_FILE="${DATA_DIR}/cfopt-domains.txt"
+if [ -n "${cfdom}" ]; then
+    if /usr/bin/python3 "${CFOPT_PY}" domains "${CFOPT_DOMAINS_FILE}" add "${cfdom}" \
+            >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>&1; then
+        echo "已追加优选域名：${cfdom}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+    else
+        echo "追加优选域名失败：${cfdom}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+    fi
+fi
 
 echo "配置已保存。重启应用后生效。" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
 exit 0

@@ -108,6 +108,22 @@ MIME = {
 SWITCH_SCRIPT = "/panel-switch.js"
 
 
+def unquote_env_value(raw: str) -> str:
+    """按 shell（`. settings.env`）的语义去掉一层成对引号。
+
+    settings.env 里的值**由写入方用单引号包裹**（cmd/config_callback 的
+    `MIHOMO_API_SECRET='${secret}'`，防止值里的 `;`/`&`/反引号在 source 时被
+    当成命令执行）。所以这里必须剥掉那层引号：早期实现只做
+    `split("=")[1].strip()`，会把引号一起当成密钥，导致对 Clash API 的请求
+    全部 401（现象：状态页与面板转发「离线/不可达」，而内核本身正常）。
+    只剥**一层**且必须是成对引号，与 shell 行为一致；未加引号的旧值不受影响。
+    """
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
 def read_secret() -> str:
     """从 settings.env 读取 API 密钥（不写入日志）。"""
     path = os.path.join(DATA_DIR, "settings.env")
@@ -115,7 +131,7 @@ def read_secret() -> str:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
                 if line.startswith("MIHOMO_API_SECRET="):
-                    return line.split("=", 1)[1].strip()
+                    return unquote_env_value(line.split("=", 1)[1])
     except OSError:
         pass
     return ""

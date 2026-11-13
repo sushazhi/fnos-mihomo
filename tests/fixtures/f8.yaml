@@ -1,0 +1,5 @@
+hosts:
+  # 注释
+    keep.example.net: 10.0.0.1
+proxies: []
+rules: []

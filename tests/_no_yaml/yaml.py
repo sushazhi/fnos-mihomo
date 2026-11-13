@@ -1,0 +1,1 @@
+raise ImportError("PyYAML disabled for this test")

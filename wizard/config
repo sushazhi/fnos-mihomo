@@ -9,8 +9,14 @@
         "initValue": "7890",
         "helpText": "修改后需重启应用生效",
         "rules": [
-          { "required": true, "message": "请输入端口" },
-          { "pattern": "^[0-9]+$", "message": "必须是数字" }
+          {
+            "required": true,
+            "message": "请输入端口"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "必须是数字"
+          }
         ]
       },
       {
@@ -20,8 +26,14 @@
         "initValue": "9090",
         "helpText": "面板与状态页的连接端口",
         "rules": [
-          { "required": true, "message": "请输入端口" },
-          { "pattern": "^[0-9]+$", "message": "必须是数字" }
+          {
+            "required": true,
+            "message": "请输入端口"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "必须是数字"
+          }
         ]
       },
       {
@@ -31,7 +43,10 @@
         "initValue": "",
         "helpText": "留空表示保持现有密钥不变",
         "rules": [
-          { "min": 4, "message": "至少 4 位" }
+          {
+            "min": 4,
+            "message": "至少 4 位"
+          }
         ]
       },
       {
@@ -47,6 +62,71 @@
         "label": "允许局域网连接",
         "initValue": "true",
         "helpText": "关闭后仅本机可使用代理端口"
+      }
+    ]
+  },
+  {
+    "stepTitle": "Cloudflare 优选 IP（可选）",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "把优选 IP 注入内核 hosts，让走 DIRECT 出站的 Cloudflare 前置站点直连到优选 IP，IPv4 与 IPv6 都支持。会按域名分别实测选出各自最快的 IP。<b>生效前提：流量要经过本应用的混合代理端口</b>；不走代理端口的设备请使用生成的 cfopt-hosts.txt。"
+      },
+      {
+        "type": "select",
+        "field": "wizard_cfopt_source",
+        "label": "优选来源",
+        "initValue": "url",
+        "helpText": "外部结果：拉取现成的优选列表；内置测速：由本机现测（更贴合本机出口）",
+        "options": [
+          {
+            "label": "外部优选结果（URL）",
+            "value": "url"
+          },
+          {
+            "label": "内置测速（本机现测）",
+            "value": "measure"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_cfopt_url",
+        "label": "优选结果地址",
+        "initValue": "",
+        "helpText": "来源选「外部结果」时必填：result.csv 或纯文本 IP 列表的直链；留空=保持现有，填 off=关闭该功能"
+      },
+      {
+        "type": "text",
+        "field": "wizard_cfopt_domain_add",
+        "label": "追加优选域名（可留空）",
+        "initValue": "",
+        "helpText": "逗号分隔，会<b>追加</b>进清单、不会删除已有域名（example.com 覆盖该域名及所有子域）。清单存在数据目录的 cfopt-domains.txt，可用应用设置→状态页或命令查看/删除。留空即保持现有清单不变。"
+      },
+      {
+        "type": "select",
+        "field": "wizard_cfopt_interval",
+        "label": "优选列表刷新间隔",
+        "initValue": "24",
+        "helpText": "每次保存设置都会采用此处的值，请按需确认；0 表示只在应用启动时刷新一次",
+        "options": [
+          {
+            "label": "每 6 小时",
+            "value": "6"
+          },
+          {
+            "label": "每 12 小时",
+            "value": "12"
+          },
+          {
+            "label": "每 24 小时",
+            "value": "24"
+          },
+          {
+            "label": "仅应用启动时刷新一次",
+            "value": "0"
+          }
+        ]
       }
     ]
   }

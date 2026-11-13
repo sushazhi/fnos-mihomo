@@ -1,0 +1,2 @@
+hosts: {'+.example.com': 4.4.4.4}
+rules: []

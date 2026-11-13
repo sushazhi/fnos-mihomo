@@ -1296,9 +1296,6 @@ def fix_fpk_permissions(fpk_path):
     exe_re = re.compile(r"^(mihomo|bin/[^/]+(\.py)?|panels/.*\.(cgi|sh))$")
     fixed = _rewrite_tar_modes(raw, re.compile(r"^cmd/[^/]+$"),
                               inner_pattern=exe_re, fixed_mtime=fixed_mtime)
-    # 外层 gzip 头的时间戳同样要钉住
-    with open(fpk_path, "wb") as f:
-        f.write(gzip.compress(fixed, compresslevel=6, mtime=0))
 
     # ── 重算 manifest.checksum ────────────────────────────────────
     # ⚠️ 真实缺陷：fnpack 是在**改写之前**算的 checksum（app.tgz 的 MD5）。
@@ -1355,6 +1352,14 @@ def fix_fpk_permissions(fpk_path):
     else:
         log("  cmd/* 权限无需修正")
     log("  已钉住包内时间戳（mtime=%d），构建可复现" % fixed_mtime)
+
+    # ⚠️ 必须在**最后**才写盘：上面重算 checksum 时重建了 fixed（内存变量）。
+    #    此前这里在第 1299 行先写了一次、之后只改内存，导致磁盘上留下的仍是
+    #    fnpack 算的旧 checksum —— 与**实际发出去的 app.tgz** 对不上，
+    #    安装器若校验该字段就会判定包损坏（该修复等于没生效）。
+    #    只在最终版本上写一次，外层 gzip 头的时间戳同样钉住。
+    with open(fpk_path, "wb") as f:
+        f.write(gzip.compress(fixed, compresslevel=6, mtime=0))
 
 
 def build_fpk(force):

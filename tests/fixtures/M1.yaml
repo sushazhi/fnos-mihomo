@@ -1,0 +1,1 @@
+rules: ['DOMAIN-SUFFIX,example.net,PROXY', 'MATCH,DIRECT']

@@ -1,0 +1,2 @@
+hosts: {a.example.com: 1.2.3.4}#c
+rules: []

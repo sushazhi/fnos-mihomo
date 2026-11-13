@@ -1,0 +1,4 @@
+"hosts":
+  a.example.com: 1.2.1.1
+"rules":
+  - 'DOMAIN-SUFFIX,x.com,PROXY'

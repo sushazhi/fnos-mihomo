@@ -41,6 +41,19 @@ UI_PORT="${MIHOMO_UI_PORT:-9092}"
 API_SECRET=""
 SUB_URL=""
 ALLOW_LAN="true"
+# Cloudflare 优选 IP 穿透
+CFOPT_URL=""
+CFOPT_DOMAINS=""
+CFOPT_INTERVAL="24"
+# 优选来源：url = 外部优选结果（result.csv / 纯文本）；measure = 内置测速自己选
+CFOPT_SOURCE="url"
+# 内置测速参数：SNI 用于 TLS 测速、候选网段留空则用 Cloudflare 官方公布段
+CFOPT_SNI="speed.cloudflare.com"
+CFOPT_CIDRS=""
+CFOPT_CANDIDATES="400"
+CFOPT_CONC="48"
+CFOPT_TIMEOUT_MS="1500"
+CFOPT_SPEEDTEST="false"
 if [ -f "${DATA_DIR}/settings.env" ]; then
     # shellcheck disable=SC1090
     . "${DATA_DIR}/settings.env" || true
@@ -50,12 +63,62 @@ if [ -f "${DATA_DIR}/settings.env" ]; then
     API_SECRET="${MIHOMO_API_SECRET:-}"
     SUB_URL="${MIHOMO_SUBSCRIPTION_URL:-}"
     ALLOW_LAN="${MIHOMO_ALLOW_LAN:-true}"
+    CFOPT_URL="${MIHOMO_CFOPT_URL:-}"
+    CFOPT_DOMAINS_LEGACY="${MIHOMO_CFOPT_DOMAINS:-}"
+    CFOPT_INTERVAL="${MIHOMO_CFOPT_INTERVAL:-24}"
+    CFOPT_SOURCE="${MIHOMO_CFOPT_SOURCE:-url}"
+    CFOPT_SNI="${MIHOMO_CFOPT_SNI:-speed.cloudflare.com}"
+    CFOPT_CIDRS="${MIHOMO_CFOPT_CIDRS:-}"
+    CFOPT_CANDIDATES="${MIHOMO_CFOPT_CANDIDATES:-400}"
+    CFOPT_CONC="${MIHOMO_CFOPT_CONC:-48}"
+    CFOPT_TIMEOUT_MS="${MIHOMO_CFOPT_TIMEOUT_MS:-1500}"
+    CFOPT_SPEEDTEST="${MIHOMO_CFOPT_SPEEDTEST:-false}"
 fi
+
+# 域名清单改为**独立文件**（settings.env 里的旧字段仅用于一次性迁移）。
+# 原因：向导 text 字段上限 1023 字节，而清单是数据（79 个域名已 929 字节）；
+# 且表单提交是「整份替换」，浏览器自动填充的旧值会冲掉整份清单（真机踩过）。
+CFOPT_DOMAINS_FILE="${DATA_DIR}/cfopt-domains.txt"
+mkdir -p "${DATA_DIR}" 2>/dev/null || true
+if [ ! -f "${CFOPT_DOMAINS_FILE}" ] && [ -n "${CFOPT_DOMAINS_LEGACY:-}" ]; then
+    # 老版本升级路径：把 settings.env 里的清单落到文件，改一次即可，之后不再读该字段
+    printf '%s\n' "${CFOPT_DOMAINS_LEGACY}" | tr ',' '\n' | sed '/^$/d' > "${CFOPT_DOMAINS_FILE}" 2>/dev/null \
+        && log "cfopt: 已把 settings.env 里的域名清单迁移到 ${CFOPT_DOMAINS_FILE}" 2>/dev/null || true
+fi
+# 从文件读出清单（逗号拼接，供下游沿用原有参数形态）。`#` 注释与空行忽略。
+# 只用 grep/tr/sed：`paste` 在部分精简环境里不存在（实测 MSYS 与某些容器就缺）。
+CFOPT_DOMAINS="$(grep -vhE '^[[:space:]]*(#|$)' "${CFOPT_DOMAINS_FILE}" 2>/dev/null \
+    | tr -d '[:blank:]' | tr '\n' ',' | sed 's/,$//' 2>/dev/null)"
+CFOPT_DOMAINS="${CFOPT_DOMAINS:-}"
 
 CONFIG_FILE="${DATA_DIR}/config.yaml"
 LOG_FILE="${DATA_DIR}/mihomo.log"
 CORE_PID="${DATA_DIR}/mihomo.pid"
 UI_PID="${DATA_DIR}/ui.pid"
+CFOPT_IP_FILE="${DATA_DIR}/cfopt-ips.txt"
+CFOPT_SNIPPET="${DATA_DIR}/cfopt-hosts.txt"
+CFOPT_PID="${DATA_DIR}/cfopt.pid"
+CFOPT_HISTORY="${DATA_DIR}/cfopt-history.log"
+# cfopt.py 的绝对路径：fetch / measure / inject 三个子命令都在这个文件里。
+# 原先它们以 heredoc 内嵌在本脚本里 —— 行结构不可见、静态检查抓不到、无法单元测试。
+CFOPT_PY="${APP_DIR}/cfopt.py"
+# 「正在停止」标记：见 stop_all / cfopt_apply，用于挡住比守护进程活得久的刷新子进程
+CFOPT_STOP_FLAG="${DATA_DIR}/cfopt.stop"
+# 每个域名、每个协议族（IPv4 / IPv6）最多映射几个优选 IP。
+# 注意：mihomo 的 ResolveIP 是在结果里【随机】取一个（DIRECT 双栈则按协议族并发竞速），
+# 数量越多命中慢 IP 的概率越大，因此只保留前若干个（列表本身已按速度排序）。
+CFOPT_TOP=4
+# 按域名选 IP 时，每个域名保留几个（1 个最稳；留 2 个可在首选失效时兜底）。
+# 用满 CFOPT_TOP(4) 没意义：实测同一 IP 对不同域名可差一个数量级，多塞只会增加
+# 命中慢 IP 的概率。
+CFOPT_MAP_TOP=2
+# 注入行的自识别标记。**这是唯一的真源**：cfopt_inject 里的 python 直接读这个
+# 环境变量（os.environ["CFOPT_MARK"]），不再各写一份字面量 —— 两处不一致会导致
+# 历史注入的 rules 行永远剥不掉，每轮刷新多留一条过期 DIRECT 规则。
+export CFOPT_MARK="# cfopt:"
+# 内置测速的候选网段（Cloudflare 官方公布；见 https://www.cloudflare.com/ips-v4、ips-v6）
+CFOPT_CIDRS_V4_DEFAULT="173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22"
+CFOPT_CIDRS_V6_DEFAULT="2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32"
 
 mkdir -p "${DATA_DIR}" 2>/dev/null || true
 
@@ -251,6 +314,354 @@ open(path, "w", encoding="utf-8").write(text)
 PYEOF
 }
 
+# ── Cloudflare 优选 IP → DIRECT 出口 ─────────────────────────
+#
+# 要解决的问题：Cloudflare 免费版只把访客调度到「就近但不一定最快」的
+# anycast IP，运营商绕路时延迟/丢包会明显变差。本功能把优选 IP 注入
+# mihomo 的 hosts，于是走 DIRECT 出站的 CF 前置站点会直连到优选 IP。
+#
+# 优选来源有两种（CFOPT_SOURCE）：
+#   url     —— 外部优选结果：result.csv（CloudflareSpeedTest）或纯文本 IP 列表；
+#   measure —— 内置测速：从 Cloudflare 官方网段抽样，自己测 TCP 握手延迟，
+#              可选再做一次带正确 SNI 的下载测速。两者产出同一份
+#              CFOPT_IP_FILE，因此下游管线完全共用。
+#
+# 两种来源都【不是一次性】的：向导里保存只是一次初始值，真正保证
+# 「优选一直有效」的是 cfopt_daemon 每 CFOPT_INTERVAL 小时反复重测/重拉，
+# 每次拿到新结果再走同一条「注入 → 校验 → 换盘 → 热重载」。
+#
+# 生效链路（已逐条对照 mihomo 源码，不是推测）：
+#   1. executor.ApplyConfig → updateHosts(cfg.Hosts) → resolver.DefaultHosts
+#      （*trie.DomainTrie），【与 dns.enable 无关】，每次加载配置都会刷新；
+#   2. resolver.LookupIPWithResolver / LookupIPv4/6WithResolver 在【任何 DNS
+#      之前】先查 DefaultHosts，命中即返回；
+#   3. DIRECT 出站拨号时 RemoteAddress() 仍是域名，经
+#      dialer.WithResolver(resolver.DirectHostResolver) 走同一条链路；
+#   4. 键 '+.example.com' 经 trie.Insert 同时写入【裸域精确命中】与
+#      【子域通配】，因此一个键覆盖该域名及其所有子域；
+#   5. rules 是首次匹配生效，所以注入的 DOMAIN-SUFFIX,...,DIRECT 必须
+#      排在 rules 列表最前面。
+#
+# IPv4 / IPv6（这条是修正过的事实，别再按「内核一定关 IPv6」的老经验写）：
+#   - Direct.DialContext 用 network="tcp"（Base.prefer = DualStack 时不加单栈约束），
+#     dialer.parseAddr 因此调用 resolver.LookupIPWithResolver；
+#   - 该函数命中 hosts 时是 `return node.IPs`，【完全不经过 DisableIPv6】，
+#     所以同一个 hosts 键下的 IPv4 与 IPv6 会一起返回；
+#   - 随后 dualStackDialContext 把 v4/v6 各成一组并发竞速（DualStack 下两组
+#     都是 primary），先连上者胜 —— 即默认配置下 IPv6 优选天然可用；
+#   - resolver.DisableIPv6 由【顶层】ipv6 驱动
+#     （executor.updateGeneral: resolver.DisableIPv6 = !general.IPv6），
+#     本应用生成的配置不写 ipv6，内核默认顶层 ipv6: true ⇒ DisableIPv6 = false；
+#     只有订阅把顶层 ipv6 设为 false、且用 ip-version: ipv6-only 强制单栈
+#     （network="tcp6" → LookupIPv6WithResolver）时才会被 ErrIPv6Disabled 拦掉；
+#   - UDP/DIRECT 走 ResolveUDP → ResolveIPWithResolver，有 IPv4 时优先 IPv4。
+#
+# ⚠️ 使用前提（否则会「看起来没生效」）：
+#   mihomo 只有在【拿到域名】时才能用 hosts 改写解析结果。
+#   本应用以 package 用户运行、无法创建 TUN，因此：
+#   - 浏览器/客户端把域名交给 mixed-port 代理（HTTP CONNECT / SOCKS 带域名）→ 生效；
+#   - 应用自己解析 DNS 后按 IP 直连（不走代理端口）→ 内核根本看不到域名，hosts 无从介入。
+#   后者请使用本功能同步生成的 cfopt-hosts.txt，粘贴到客户端 /etc/hosts
+#   或局域网 DNS（AdGuard Home / dnsmasq）的 hosts 重写上。
+
+# 拉取优选列表。解析成功才覆盖 CFOPT_IP_FILE，
+# 网络抖动时沿用上一次的列表，避免把可用配置清空。
+cfopt_fetch() {
+    [ -n "${CFOPT_URL}" ] || return 1
+    [ -x /usr/bin/python3 ] || { log "WARN cfopt: 缺少 python3"; return 1; }
+    [ -f "${CFOPT_PY}" ] || { log "WARN cfopt: 缺少 ${CFOPT_PY}"; return 1; }
+    /usr/bin/python3 "${CFOPT_PY}" fetch "${CFOPT_URL}" "${CFOPT_IP_FILE}" >> "${LOG_FILE}" 2>&1
+}
+
+# 内置测速：从 Cloudflare 官方网段抽样，自己测出优选 IP。
+# 只用 Python 标准库，不需要额外二进制、不需要 root。
+# 产出写到 CFOPT_IP_FILE，格式与 cfopt_fetch 完全一致，
+# 因此「注入 → 校验 → 换盘 → 热重载」这条下游管线完全复用。
+# 注意：测的是本机出口到 CF 的延迟/速度，而 DIRECT 出口也正是本机出口，
+# 所以比在别处跑出来的第三方列表更贴近实际。
+cfopt_measure() {
+    [ -x /usr/bin/python3 ] || { log "WARN cfopt: 缺少 python3"; return 1; }
+    [ -f "${CFOPT_PY}" ] || { log "WARN cfopt: 缺少 ${CFOPT_PY}"; return 1; }
+    local cidrs="${CFOPT_CIDRS}"
+    [ -n "${cidrs}" ] || cidrs="${CFOPT_CIDRS_V4_DEFAULT},${CFOPT_CIDRS_V6_DEFAULT}"
+    /usr/bin/python3 "${CFOPT_PY}" measure "${cidrs}" "${CFOPT_IP_FILE}" "${CFOPT_SNI}" \
+        "${CFOPT_CANDIDATES}" "${CFOPT_CONC}" "${CFOPT_TIMEOUT_MS}" \
+        "${CFOPT_SPEEDTEST}" "${CFOPT_HISTORY}" "${CFOPT_TOP}" >> "${LOG_FILE}" 2>&1
+}
+
+# 按「优选来源」取数。两种来源产出同一份 CFOPT_IP_FILE。
+cfopt_acquire() {
+    case "${CFOPT_SOURCE}" in
+        measure) cfopt_measure ;;
+        *)       cfopt_fetch ;;
+    esac
+}
+
+# 按域名分别实测，产出「域名 → 该域名最快的 IP」映射（CFOPT_IP_FILE.map）。
+# 为什么需要：Cloudflare 的限速按「IP + 站点」计，同一 IP 对不同域名可差一个数量级，
+# 一份全局 IP 列表必然让部分站点吃亏。失败不影响主流程 —— inject 会自动回退全局列表。
+cfopt_map_domains() {
+    [ -n "${CFOPT_DOMAINS}" ] || return 0
+    [ -s "${CFOPT_IP_FILE}" ] || return 0
+    [ -f "${CFOPT_PY}" ] || return 0
+    /usr/bin/python3 "${CFOPT_PY}" map "${CFOPT_IP_FILE}" "${CFOPT_DOMAINS}" \
+        "${CFOPT_IP_FILE}.map" "${CFOPT_MAP_TOP}" "${CFOPT_CONC}" >> "${LOG_FILE}" 2>&1 \
+        || log "WARN cfopt: 按域名选 IP 失败，全部域名回退全局列表"
+}
+
+# 把优选 IP 注入配置副本：hosts 域名→IP 数组 + 置顶 DIRECT 规则。
+# 注入的每一行都自带 '# cfopt:' 标记，重新注入时先整行剔除，
+# 因此重复执行是幂等的，也不会随订阅更新不断堆积。
+# 生成结果写到 ${CONFIG_FILE}.cfopt-new，原配置在通过校验前绝不改动。
+cfopt_inject() {
+    local doms="$1"
+    [ -f "${CONFIG_FILE}" ] || return 1
+    [ -x /usr/bin/python3 ] || return 1
+    [ -f "${CFOPT_PY}" ] || return 1
+    local cand="${CONFIG_FILE}.cfopt-new"
+    cp -f "${CONFIG_FILE}" "${cand}" 2>/dev/null || return 1
+    /usr/bin/python3 "${CFOPT_PY}" inject "${cand}" "${CFOPT_IP_FILE}" "${doms}" "${CFOPT_TOP}" "${CFOPT_SNIPPET}" >> "${LOG_FILE}" 2>&1
+}
+
+# 校验候选配置：mihomo -t 只做解析（executor.Parse → config.Parse），
+# 不调用 ApplyConfig、不绑定任何端口，因此可以和正在运行的内核并存。
+cfopt_validate() {
+    local cand="$1"
+    [ -x "${MIHOMO_BIN}" ] || return 0
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 "${MIHOMO_BIN}" -t -d "${DATA_DIR}" -f "${cand}" >> "${LOG_FILE}" 2>&1
+    else
+        "${MIHOMO_BIN}" -t -d "${DATA_DIR}" -f "${cand}" >> "${LOG_FILE}" 2>&1
+    fi
+}
+
+# 热重载：优先走 Clash API（payload 分支不校验路径，且解析失败会返回 400
+# 并保留原配置），失败再退到 SIGHUP。
+cfopt_reload() {
+    core_running || return 0
+    local body code
+    body="{\"path\": \"${CONFIG_FILE}\"}"
+    if [ -n "${API_SECRET}" ]; then
+        code="$(curl -s -o /dev/null -w '%{http_code}' -m 8 -X PUT \
+            -H "Authorization: Bearer ${API_SECRET}" \
+            -H 'Content-Type: application/json' -d "${body}" \
+            "http://127.0.0.1:${API_PORT}/configs?force=true")"
+    else
+        code="$(curl -s -o /dev/null -w '%{http_code}' -m 8 -X PUT \
+            -H 'Content-Type: application/json' -d "${body}" \
+            "http://127.0.0.1:${API_PORT}/configs?force=true")"
+    fi
+    case "${code}" in
+        200|204)
+            log "cfopt: 内核已热重载配置"
+            return 0
+            ;;
+    esac
+    log "WARN cfopt: API 热重载返回 ${code:-无响应}，改用 SIGHUP"
+    # 兜底发 SIGHUP 前必须确认这个 pid 真的属于本应用内核：
+    # pid 文件中可能残留崩溃前写入的「已被系统复用」的 pid，
+    # 直接 kill 会误伤无关进程（与 stop_all 中 ﻿pkill -f 的教训同源）。
+    local pid exe target
+    pid="$(read_pid "${CORE_PID}")"
+    target="$(readlink -f "${MIHOMO_BIN}" 2>/dev/null || printf '%s' "${MIHOMO_BIN}")"
+    exe="$(readlink -f "/proc/${pid}/exe" 2>/dev/null)"
+    if [ -n "${pid}" ] && [ "${exe}" = "${target}" ] && kill -HUP "${pid}" 2>/dev/null; then
+        log "cfopt: 已向内核 ${pid} 发送 SIGHUP"
+        return 0
+    fi
+    log "ERROR cfopt: 热重载失败（配置已落盘，下次重启应用生效）"
+    return 1
+}
+
+# 一次完整动作：拉取 → 注入 → 校验 → 换盘 → 热重载。
+cfopt_apply() {
+    local mode="${1:-full}"
+    [ -f "${CONFIG_FILE}" ] || return 0
+    [ -x /usr/bin/python3 ] || return 0
+    # 这里必须**先记一条日志**再返回：cfopt-refresh 只调本函数，若缺 cfopt.py 就静默
+    # return 0，用户看到的是「功能完全没生效、连日志都没有」，无从排查（CI 漏打包即如此）。
+    [ -f "${CFOPT_PY}" ] || { log "WARN cfopt: 找不到 ${CFOPT_PY}，跳过优选注入"; return 0; }
+    # 应用正在停止：绝不能再改配置。刷新子进程可能比守护进程活得久一点，
+    # 标记直到下次 start 才清除（见 stop_all / start_core）。
+    if [ -f "${CFOPT_STOP_FLAG}" ]; then
+        log "cfopt: 应用正在停止，放弃本次注入"
+        return 0
+    fi
+
+    # 是否启用：域名必填；url 来源还必须有地址，measure 来源自己就能产出。
+    local doms="" enabled=0
+    if [ -n "${CFOPT_DOMAINS}" ]; then
+        case "${CFOPT_SOURCE}" in
+            measure) enabled=1 ;;
+            *)       [ -n "${CFOPT_URL}" ] && enabled=1 ;;
+        esac
+    fi
+
+    if [ "${enabled}" = "1" ]; then
+        doms="${CFOPT_DOMAINS}"
+        if [ "${mode}" = "cached" ]; then
+            # 启动早期只用手上已有的列表，不联网（内置测速可能耗十几秒）
+            if [ ! -s "${CFOPT_IP_FILE}" ]; then
+                log "cfopt: 暂无优选列表，留待启动后刷新补齐"
+                return 0
+            fi
+        else
+            cfopt_acquire || log "WARN cfopt: 取优选列表失败，沿用上次缓存的 IP 列表"
+            if [ ! -s "${CFOPT_IP_FILE}" ]; then
+                log "WARN cfopt: 没有可用的 IP 列表，跳过注入"
+                return 0
+            fi
+        fi
+    fi
+
+    local cand="${CONFIG_FILE}.cfopt-new"
+    # 注入前先按域名挑 IP（有映射的域名用自己实测最快的，其余**不注入**、保留订阅策略）。
+    # ⚠️ cached 模式（启动早期、内核还没起）**不重测**：那一轮要给每个域名各做一次 TLS
+    #    实测（实测 272 域名 ≈227s），等于把「代理可用」整体推迟好几分钟。启动时沿用上一轮
+    #    留下的映射即可；map 自己有 TTL + 域名指纹，full 模式会按需重测，不会用陈旧结果。
+    if [ "${mode}" != "cached" ]; then
+        cfopt_map_domains || true
+    fi
+    if ! cfopt_inject "${doms}"; then
+        rm -f "${cand}" 2>/dev/null || true
+        log "ERROR cfopt: 生成注入配置失败"
+        return 1
+    fi
+
+    # 内容没变就不必校验和重载，避免无意义地打断现有连接
+    if cmp -s "${CONFIG_FILE}" "${cand}" 2>/dev/null; then
+        rm -f "${cand}" 2>/dev/null || true
+        return 0
+    fi
+
+    if ! cfopt_validate "${cand}"; then
+        log "ERROR cfopt: 注入后的配置未通过校验，本次注入已放弃（原配置未被改动）"
+        mv -f "${cand}" "${DATA_DIR}/cfopt-rejected.yaml" 2>/dev/null || rm -f "${cand}" 2>/dev/null || true
+        return 1
+    fi
+
+    cp -f "${CONFIG_FILE}" "${CONFIG_FILE}.cfopt.bak" 2>/dev/null || true
+    if ! mv -f "${cand}" "${CONFIG_FILE}"; then
+        log "ERROR cfopt: 替换配置失败"
+        return 1
+    fi
+    if [ "${enabled}" = "1" ] && grep -qF "${CFOPT_MARK}" "${CONFIG_FILE}" 2>/dev/null; then
+        log "cfopt: 已注入优选 IP（来源：${CFOPT_SOURCE}，域名：${doms}）"
+    elif [ "${enabled}" = "1" ]; then
+        # 本次一个映射都没写成（hosts/rules 写法不支持被整次放弃），
+        # 只是把上一轮的注入清理掉了 —— 别报「已注入」。
+        log "cfopt: 本次未注入任何内容（写法不支持），已清理旧的优选注入"
+    else
+        log "cfopt: 已清除优选注入（功能未启用）"
+    fi
+    cfopt_reload
+}
+
+# 后台常驻：每 CFOPT_INTERVAL 小时刷新一次
+cfopt_daemon() {
+    local hours="${1:-24}" secs
+    case "${hours}" in ''|*[!0-9]*) hours=24 ;; esac
+    secs=$(( hours * 3600 ))
+    log "cfopt: 刷新守护进程启动，间隔 ${hours}h"
+    while :; do
+        sleep "${secs}" &
+        wait $! 2>/dev/null || break
+        bash "${0}" cfopt-refresh >> "${LOG_FILE}" 2>&1 || true
+    done
+    log "cfopt: 刷新守护进程退出"
+}
+
+cfopt_loop_start() {
+    # 先把上一轮的守护进程、以及可能正在前台跑的刷新子进程收干净，再决定是否启动。
+    # 早先把这段放在间隔判断之后，导致「把间隔从 24 改成 0」时旧守护进程依然活着、
+    # 继续按老间隔改配置 —— “仅启动注入一次”被静默忽略。
+    local old
+    old="$(read_pid "${CFOPT_PID}")"
+    # 只杀【确认是本脚本守护进程】的那个 pid：pid 文件可能因崩溃而残留，
+    # pid 复用时会误杀无关进程（cfopt_reload 里的 SIGHUP 也出于同样顾虑做了校验）。
+    if cfopt_pid_is "${old}" cfopt-daemon; then
+        kill -TERM "${old}" 2>/dev/null || true
+        sleep 1
+        cfopt_pid_is "${old}" cfopt-daemon && kill -KILL "${old}" 2>/dev/null || true
+    elif [ -n "${old}" ] && pid_alive "${old}"; then
+        log "cfopt: pid 文件里的 ${old} 不是本应用的刷新守护进程，只清文件不杀进程"
+    fi
+    rm -f "${CFOPT_PID}" 2>/dev/null || true
+    cfopt_reap_children
+
+    [ -n "${CFOPT_DOMAINS}" ] || { log "cfopt: 未配置域名，定时刷新未启动"; return 0; }
+    if [ "${CFOPT_SOURCE}" = "measure" ]; then
+        :                                    # 内置测速不需要外部地址
+    elif [ -z "${CFOPT_URL}" ]; then
+        log "cfopt: 未配置优选地址，定时刷新未启动"
+        return 0
+    fi
+
+    local hours="${CFOPT_INTERVAL}"
+    case "${hours}" in ''|*[!0-9]*) hours=24 ;; esac
+    if [ "${hours}" -lt 1 ] || [ "${hours}" -gt 720 ]; then
+        log "cfopt: 刷新间隔 ${hours}h，仅做启动时一次注入（已停掉旧的定时刷新）"
+        return 0
+    fi
+
+    nohup bash "$(readlink -f "${0}" 2>/dev/null || printf '%s' "${0}")" \
+        cfopt-daemon "${hours}" >> "${LOG_FILE}" 2>&1 &
+    echo "$!" > "${CFOPT_PID}"
+    log "cfopt: 定时刷新已启动，每 ${hours} 小时一次（pid $!）"
+}
+
+# 命令行是否指向本应用的这个脚本。除严格比对绝对路径外，还认「同名 <...>/cmd/<脚本名>」：
+# 应用升级会换安装目录，旧守护进程命令行里仍是旧路径，不能因此漏杀 ——
+# 漏杀会留下两个守护进程各自刷新（双份流量、双份 mihomo -t）。
+cfopt_cmd_is_ours() {
+    local cmd="${1:-}" self
+    self="$(readlink -f "${0}" 2>/dev/null || printf '%s' "${0}")"
+    case "${cmd}" in *"${self}"*) return 0 ;; esac
+    case "${cmd}" in *"/cmd/${self##*/}"*) return 0 ;; esac
+    return 1
+}
+
+# 判断 pid 是否确实是本脚本的某个子命令实例（防 pid 文件残留 + pid 复用误杀）。
+# 没有 /proc、或读不到命令行时无从校验，退回「信任 pid 文件」的老行为 ——
+# 宁可留下这点误杀风险，也不要漏杀，让两个守护进程同时改配置。
+cfopt_pid_is() {
+    local pid="${1:-}" want="${2:-}" cmd
+    [ -n "${pid}" ] || return 1
+    pid_alive "${pid}" || return 1
+    [ -r "/proc/${pid}/cmdline" ] || return 0
+    cmd="$( { tr '\0' ' ' < "/proc/${pid}/cmdline"; } 2>/dev/null )" || return 0
+    cfopt_cmd_is_ours "${cmd}" || return 1
+    case "${cmd}" in
+        *"${want}"*) return 0 ;;
+    esac
+    return 1
+}
+
+# 收掉可能正在前台跑的刷新子进程。
+# cfopt_daemon 每轮派生的 `bash <本脚本> cfopt-refresh` 是【独立进程】：
+# 杀掉守护进程并不会连带杀掉它；而它一跑完就会把「本轮候选」mv 覆盖到
+# config.yaml 上 —— 若此刻刚拉取了新订阅、或应用正在停止，就会把新配置盖回去。
+cfopt_reap_children() {
+    local pid cmd killed=0
+    for p in /proc/[0-9]*; do
+        pid="${p#/proc/}"
+        [ "${pid}" = "$$" ] && continue
+        [ "${pid}" = "${PPID}" ] && continue
+        cmd="$( { tr '\0' ' ' < "${p}/cmdline"; } 2>/dev/null )" || continue
+        case "${cmd}" in
+            *cfopt-refresh*) ;;
+            *) continue ;;
+        esac
+        # 还要确认是本应用的脚本，避免误伤命令行里恰好含该词的无关进程
+        cfopt_cmd_is_ours "${cmd}" || continue
+        if kill -KILL "${pid}" 2>/dev/null; then
+            killed=$((killed + 1))
+            log "reaped cfopt refresh child pid ${pid}"
+        fi
+    done
+    return 0
+}
+
 pid_alive() {
     [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
 }
@@ -303,6 +714,11 @@ ui_running() {
 }
 
 start_core() {
+    # 本次启动的开始：先清掉上一轮留下的「正在停止」标记。
+    # 必须放在 core_running 早退【之前】—— 否则「内核还在运行时就 start」
+    # 这条路径永远不会清标记，之后每次 start / refresh 都会被 cfopt_apply
+    # 拒绝，功能被永久静默禁用（要等一次「内核确实不在」的 stop+start 才恢复）。
+    rm -f "${CFOPT_STOP_FLAG}" 2>/dev/null || true
     if core_running; then
         log "core already running"
         return 0
@@ -320,6 +736,10 @@ start_core() {
     ensure_config
     fetch_subscription
     write_secret
+    # 订阅会整份覆盖 config.yaml，因此优选注入必须排在订阅之后、内核启动之前：
+    # 这样内核一起来就带着 hosts + 置顶 DIRECT 规则，无需依赖热重载。
+    # 这里用 cached：只用已有列表，不联网，避免内置测速把开机拖慢十几秒。
+    cfopt_apply cached || log "WARN cfopt: 启动时注入优选 IP 失败，继续使用原配置"
 
     log "starting mihomo: ${MIHOMO_BIN} -d ${DATA_DIR}"
     nohup "${MIHOMO_BIN}" -d "${DATA_DIR}" -f "${CONFIG_FILE}" >> "${LOG_FILE}" 2>&1 &
@@ -396,7 +816,12 @@ start_ui() {
 
 stop_all() {
     local pid
-    for pf in "${UI_PID}" "${CORE_PID}"; do
+    # 立「正在停止」标记：万一还有刷新子进程没被收掉，它完成时会看到这个标记
+    # 而放弃覆盖配置。清除动作放在 start_core（而不是这里），否则停止过程中
+    # 仍可能被它覆盖。
+    : > "${CFOPT_STOP_FLAG}" 2>/dev/null || true
+    # 刷新守护进程排在最前：先停它，否则它可能在停止过程中又把配置改回去
+    for pf in "${CFOPT_PID}" "${UI_PID}" "${CORE_PID}"; do
         pid="$(read_pid "${pf}")"
         if pid_alive "${pid}"; then
             kill -TERM "${pid}" 2>/dev/null || true
@@ -410,6 +835,10 @@ stop_all() {
         fi
         rm -f "${pf}" 2>/dev/null || true
     done
+
+    # 守护进程被 TERM 时，它前台正在跑的那个 refresh 子进程不会跟着死，所以要单独收。
+    # 否则它会拿着「本轮候选」把配置覆盖回去 —— 例如刚拉取的新订阅会被盖掉。
+    cfopt_reap_children
 
     # 清理残留内核进程。
     #
@@ -436,14 +865,50 @@ stop_all() {
 
 case "${1:-start}" in
     start)
+        # 守护进程可能因崩溃 / kill -9 / 被框架杀掉而没走 stop，留下孤儿 refresh
+        # 子进程。必须在这里先收掉：否则它会在 start_ui 的健康检查（最多 10s）
+        # 期间换盘，盖掉刚拉取的订阅或刚注入的配置。
+        cfopt_reap_children
         # geo 数据预置放在最前：即使内核判定"已在运行"提前返回，也保证数据就位。
         # 该函数幂等（大小一致则跳过），重复执行无副作用。
         seed_geodata
         start_core
         start_ui
+        # 再补一次注入：start_core 在「内核已在运行」时会提前返回，
+        # 那条路径下没有走上面的注入逻辑。内容无变化时这里会自动跳过，开销可忽略。
+        cfopt_apply || log "WARN cfopt: 刷新优选 IP 失败，继续使用现有配置"
+        # 定时刷新守护进程放在最后：它调用 cfopt-refresh 时会先看内核是否在跑，
+        # 内核已就绪时才能真正热重载配置。
+        cfopt_loop_start
         ;;
     stop)
         stop_all
+        ;;
+    cfopt-refresh)
+        # 内部命令：拉取一次 → 注入 → 校验 → 换盘 → 热重载。
+        # 供刷新守护进程按间隔调用；也可以手动执行来立刻刷新。
+        cfopt_apply
+        ;;
+    cfopt-scan)
+        # 手动命令：扫出「哪些站点其实套了 Cloudflare」，供用户挑进域名清单。
+        # 只读分析，不写配置、不触发注入 —— 所以不接进自动刷新链路。
+        # 用法：cmd/main cfopt-scan [额外域名,逗号分隔]
+        [ -f "${CFOPT_PY}" ] || { log "WARN cfopt: 找不到 ${CFOPT_PY}"; exit 1; }
+        /usr/bin/python3 "${CFOPT_PY}" scan "${CFOPT_SNIPPET}" "${DATA_DIR}/cfopt-scan.txt" \
+            "${2:-}" >> "${LOG_FILE}" 2>&1
+        rc=$?
+        if [ "${rc}" -eq 0 ]; then
+            log "cfopt: 扫描结果已写入 ${DATA_DIR}/cfopt-scan.txt"
+            cat "${DATA_DIR}/cfopt-scan.txt" >> "${LOG_FILE}" 2>&1
+        else
+            log "WARN cfopt: 扫描失败（rc=${rc}），详见日志"
+        fi
+        exit "${rc}"
+        ;;
+    cfopt-daemon)
+        # 内部命令：后台常驻，周期性调用 cfopt-refresh。
+        # 每个周期都重新 fork 一个完整脚本进程，因此改完设置重启应用即生效。
+        cfopt_daemon "${2:-${CFOPT_INTERVAL:-24}}"
         ;;
     status)
         if core_running; then

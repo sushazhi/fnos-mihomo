@@ -1,0 +1,5 @@
+hosts:
+  '+.example.com': 104.16.0.1 # cfopt:hosts
+rules:
+  - 'DOMAIN-SUFFIX,example.com,DIRECT' # cfopt:rule
+proxies: []

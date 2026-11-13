@@ -113,6 +113,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: 运行 cfopt 回归测试
+        run: python tests/cfopt_test.py
+
       - name: 构建并打包
         run: python build.py --arch "${{ matrix.arch }}" --version "${VERSION}"
 
@@ -141,6 +144,16 @@ jobs:
           assert not bad, "cmd/* 缺执行位: %s" % bad
           print("cmd/* 执行位 OK:", len([m for m in t.getmembers()
                 if m.name.startswith("cmd/")]), "个")
+
+          # 新增源文件漏进版本控制时，CI 是从 checkout 构建的：包会**静默**少一个文件
+          # （app/cfopt.py 缺了优选功能就完全不生效、连日志都没有）。所以在包里独立复核。
+          inner = [m for m in t.getmembers() if m.name == "app.tgz"]
+          assert inner, "包内缺 app.tgz"
+          names = [x.name for x in tarfile.open(
+              fileobj=io.BytesIO(t.extractfile(inner[0]).read())).getmembers()]
+          assert any(n.endswith("cfopt.py") for n in names), \
+              "app.tgz 缺 cfopt.py（新源文件没提交？）: %s" % names[:20]
+          print("app.tgz 含 cfopt.py OK")
           PY
 
       - name: 上传产物
