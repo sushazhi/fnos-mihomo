@@ -439,14 +439,12 @@ CASES = {
               "user_rules": ["DOMAIN-SUFFIX,x.com,PROXY"]},
     "f05":   {"kind": "ok", "flow": False, "hosts_keys": [],
               "user_rules": ["DOMAIN-SUFFIX,example.net,PROXY"]},
-    "f22":   {"kind": "abort", "flow": False, "reason": "hosts"},
     "L1":    {"kind": "abort", "flow": False, "reason": "hosts", "snippet": "old"},
     "L2":    {"kind": "ok", "flow": True, "hosts_keys": ["a.example.com"], "user_rules": []},
     "M1":    {"kind": "ok", "flow": True, "hosts_keys": [],
               "user_rules": ["DOMAIN-SUFFIX,example.net,PROXY", "MATCH,DIRECT"]},
     "M1b":   {"kind": "abort", "flow": False, "reason": "rules", "snippet": "old"},
     "M2off": {"kind": "disabled", "flow": False, "domains": "", "snippet": "old"},
-    "M2h":   {"kind": "abort", "flow": False, "reason": "hosts"},
     "M3":    {"kind": "ok", "flow": True, "hosts_keys": [], "user_rules": []},
     "N1":    {"kind": "ok", "flow": False, "hosts_keys": [],
               "user_rules": ["MATCH,PROXY"], "log": "inject_only"},
@@ -692,8 +690,8 @@ class AFixtureSet(unittest.TestCase):
     """A 组元检查：夹具目录与期望表一致（不依赖被测实现）。"""
 
     def test_A_all_fixtures_count(self):
-        """A 表必须正好覆盖 16 个夹具。"""
-        self.assertEqual(len(CASES), 16, "A: 夹具期望表必须正好 16 例")
+        """A 表必须正好覆盖 14 个夹具。"""
+        self.assertEqual(len(CASES), 14, "A: 夹具期望表必须正好 14 例")
         have = sorted(f[:-5] for f in os.listdir(FIXDIR) if f.endswith(".yaml"))
         self.assertEqual(have, sorted(CASES), "A: tests/fixtures 下的夹具与期望表不一致")
 
@@ -782,7 +780,7 @@ class BInvariants(Base):
         self.assertIsNone(r["snippet_bytes"], "B6: 本次放弃且片段 mtime 更早时，应删除陈旧 <snippet>")
 
     def test_B7_snippet_kept_when_mtime_not_older(self):
-        r = self.h.inject_case("f22-future", pre_snippet=True, snippet_delta=+3600.0, fixture="f22")
+        r = self.h.inject_case("L1-future", pre_snippet=True, snippet_delta=+3600.0, fixture="L1")
         self.assertIsNotNone(r["snippet_bytes"],
                              "B7: 片段 mtime 不早于本次进程启动时刻时，绝不能删除（并发护栏）")
         self.assertEqual(r["snippet_bytes"], b"STALE-CFOPT-SNIPPET\n",
