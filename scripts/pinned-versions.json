@@ -18,7 +18,7 @@
     "   从而多出一个没必要的 1.19.32.1 发布。"
   ],
   "kernel": "1.19.34",
-  "metacubexd": "1.274.6",
+  "metacubexd": "1.275.2",
   "zashboard": "3.30.0",
-  "panel_seq": 0
+  "panel_seq": 1
 }
