@@ -113,6 +113,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # 套件用 PyYAML 校验注入产物；setup-python 只装解释器，不装任何第三方包，
+      # 缺了它 tests/cfopt_test.py 会在 precheck 直接 `[FATAL] ... exit 3`。
+      # 所以这一步不能省：省了这条 CI 从加上回归套件那天起就是红的。
+      - name: 安装测试依赖（PyYAML）
+        run: python -m pip install --disable-pip-version-check "pyyaml>=6,<7"
+
       - name: 运行 cfopt 回归测试
         run: python tests/cfopt_test.py
 
