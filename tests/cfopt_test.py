@@ -1578,6 +1578,117 @@ class KDomainList(Base):
         self.assertEqual(rc, 1, "K5: 未知操作应退出码 1")
 
 
+# ---------------------------------------------------------------- L. 清单的导入与裁剪
+# 背景：清单是要长期维护的数据（站点换域名、关站、迁出 CF），所以补了两个**离线可验证**
+# 的动作：`import`（从一份文件整份合并）与 `prune`（按 cfopt-scan 的实测结论做减法）。
+# 关键约束：判定只来自 scan 的实测结果，prune 自己不联网猜 —— 所以「解析失败」永不删除，
+# 扫描结果缺失时整次拒绝。删错了的后果不是报错，而是站点悄悄回退到订阅策略、优选失效。
+
+class LDomainUpkeep(Base):
+    """L. ``domains import / prune``：只做合并与减法，不猜。"""
+
+    def _dir(self):
+        d = tempfile.mkdtemp(prefix="cfopt-l-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def _lines(self, p):
+        raw = read_bytes(p)
+        if raw is None:
+            return None
+        return [l for l in raw.decode("utf-8").splitlines()
+                if l.strip() and not l.startswith("#")]
+
+    def _scan(self, d, rows):
+        """写一份 cfopt-scan 的输出（域名<TAB>v4<TAB>v6<TAB>结论），返回路径。"""
+        p = os.path.join(d, "cfopt-scan.txt")
+        body = ["# cfopt 扫描结果：域名 <TAB> IPv4数 <TAB> IPv6数 <TAB> 结论"]
+        body += ["%s\t%d\t%d\t%s" % row for row in rows]
+        write_bytes(p, ("\n".join(body) + "\n").encode("utf-8"))
+        return p
+
+    def test_L1_prune_removes_only_non_cf(self):
+        d = self._dir()
+        f = os.path.join(d, "cfopt-domains.txt")
+        write_bytes(f, b"cf.com\nplain.com\nslow.com\nmissing.com\n")
+        scan = self._scan(d, [
+            ("cf.com", 2, 0, "套 CF（已在清单）"),
+            ("plain.com", 1, 0, "非 CF"),
+            ("slow.com", 0, 0, "解析失败"),
+        ])
+        rc, log = self.h.run(["domains", f, "prune", scan])
+        self.assertEqual(rc, 0, "L1: prune 应成功（日志：%s）" % log.strip())
+        self.assertEqual(self._lines(f), ["cf.com", "missing.com", "slow.com"],
+                         "L1: 只该删「非 CF」；解析失败与未扫到的必须保留，实际 %r" % self._lines(f))
+        self.assertEqual(self._lines(f + ".bak"),
+                         ["cf.com", "missing.com", "plain.com", "slow.com"],
+                         "L1: 改前应把原清单原样备份成 .bak")
+
+    def test_L2_prune_is_noop_when_nothing_to_drop(self):
+        d = self._dir()
+        f = os.path.join(d, "cfopt-domains.txt")
+        write_bytes(f, b"a.com\nb.com\n")
+        scan = self._scan(d, [("a.com", 1, 0, "套 CF（已在清单）"),
+                             ("b.com", 1, 0, "套 CF（已在清单）")])
+        before = read_bytes(f)
+        rc, log = self.h.run(["domains", f, "prune", scan])
+        self.assertEqual(rc, 0, "L2: 没有可删项也应成功（日志：%s）" % log.strip())
+        self.assertEqual(read_bytes(f), before, "L2: 没有「非 CF」条目时不该重写清单")
+        self.assertIsNone(read_bytes(f + ".bak"), "L2: 没改动就不该产出备份")
+
+    def test_L3_prune_refuses_without_scan_result(self):
+        d = self._dir()
+        f = os.path.join(d, "cfopt-domains.txt")
+        write_bytes(f, b"a.com\n")
+        rc, log = self.h.run(["domains", f, "prune", os.path.join(d, "nope.txt")])
+        self.assertEqual(rc, 1, "L3: 读不到扫描结果必须失败（日志：%s）" % log.strip())
+        self.assertEqual(self._lines(f), ["a.com"], "L3: 失败时绝不能动清单")
+
+    def test_L4_import_merges_and_is_idempotent(self):
+        d = self._dir()
+        f = os.path.join(d, "cfopt-domains.txt")
+        write_bytes(f, b"a.com\n")
+        src = os.path.join(d, "src.txt")
+        write_bytes(src, "# 注释不算域名\nx.com, y.com\n\nz.com  # 行尾注释\nA.COM\n".encode("utf-8"))
+        rc, log = self.h.run(["domains", f, "import", src])
+        self.assertEqual(rc, 0, "L4: import 应成功（日志：%s）" % log.strip())
+        self.assertEqual(self._lines(f), ["a.com", "x.com", "y.com", "z.com"],
+                         "L4: 导入应合并去重（大小写归一），实际 %r" % self._lines(f))
+        rc, _ = self.h.run(["domains", f, "import", src])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._lines(f), ["a.com", "x.com", "y.com", "z.com"],
+                         "L4: 重复导入必须幂等")
+
+    def test_L5_import_rejects_source_without_domains(self):
+        d = self._dir()
+        f = os.path.join(d, "cfopt-domains.txt")
+        write_bytes(f, b"a.com\n")
+        src = os.path.join(d, "empty.txt")
+        write_bytes(src, "# 只有注释\n\n非法域名!\n".encode("utf-8"))
+        rc, log = self.h.run(["domains", f, "import", src])
+        self.assertEqual(rc, 1, "L5: 来源里没有合法域名时应失败（日志：%s）" % log.strip())
+        self.assertEqual(self._lines(f), ["a.com"], "L5: 失败时不该动清单")
+
+    def test_L6_cmd_main_exposes_cfopt_domains(self):
+        """清单维护必须有设备端入口，否则只能 SSH 里手拼 python3 绝对路径。"""
+        src = read_bytes(os.path.join(ROOT, "cmd", "main")).decode("utf-8")
+        self.assertRegex(src, r"(?m)^\s{4}cfopt-domains\)",
+                         "L6: cmd/main 必须提供 cfopt-domains 子命令")
+        self.assertIn("prune", src, "L6: cfopt-domains 必须支持 prune（否则清理只能手删）")
+
+    def test_L7_bom_list_keeps_first_line(self):
+        """Windows 记事本 / PowerShell 保存的清单带 BOM（-Encoding UTF8）：首行不能丢。"""
+        d = self._dir()
+        f = os.path.join(d, "cfopt-domains.txt")
+        write_bytes(f, b"a.com\n")
+        src = os.path.join(d, "bom.txt")
+        write_bytes(src, b"\xef\xbb\xbfbom.com\nc.com\n")
+        rc, log = self.h.run(["domains", f, "import", src])
+        self.assertEqual(rc, 0, "L7: 带 BOM 的来源也应导入成功（日志：%s）" % log.strip())
+        self.assertEqual(self._lines(f), ["a.com", "bom.com", "c.com"],
+                         "L7: BOM 只该被剥掉，首行域名必须保留，实际 %r" % self._lines(f))
+
+
 # ---------------------------------------------------------------- 自检（默认跳过）
 
 class SelfCheck(Base):
@@ -1677,6 +1788,7 @@ def main(argv):
 
     if not HAVE_YAML:
         print("[FATAL] 测试自身需要 PyYAML 校验产物；当前环境缺失，无法执行契约断言。")
+        print("        装一下再来：python -m pip install \"pyyaml>=6,<7\"（CI 见 build-fpk.yml）")
         return 3
 
     loader = unittest.TestLoader()

@@ -1,0 +1,113 @@
+# 走 Cloudflare 优选 IP 的 PT 站点域名 —— 参考基线（不是运行期状态）
+#
+# 运行期的真源在设备上：<数据目录>/cfopt-domains.txt
+# 这份文件只是给人看的基线：把本机清单与它 diff 一下，就知道哪些站加过、哪些早该删。
+#   · 整份推到设备：<应用安装目录>/cmd/main cfopt-domains import <这份文件>
+#   · 按实测结论删掉「非 CF」条目：<应用安装目录>/cmd/main cfopt-domains prune
+#
+# 口径（别改）：
+#   · 只收**套 Cloudflare** 的站点：注入会把域名解析到优选 IP，非 CF 站点会直接打不开；
+#   · 写裸域 example.com 即覆盖该域及其所有子域；写 *.example.com 只覆盖一级子域；
+#   · 每个域名都要做一次 TLS 实测选 IP，条目越多启动越慢（272 条那次把
+#     hdwing / ourbits / 1ptba 打挂过，见 README「按域名选 IP」）。
+#
+# 2026-11-20：杜比换域名 hddolby.com → uhddolby.com（旧域已无 A 记录；
+#             AliDNS 只剩 1.1.1.1 的污染应答，8.8.8.8 直接 SERVFAIL）
+52pt.site
+api.piggo.me
+asmrpt.org
+audionews.org
+aura4k.net
+beitai.pt
+bemaniso.ws
+cangbao.ge
+cdfile.org
+ceskeforum.com
+club.hares.top
+cnlang.org
+colapt.com
+darkland.top
+dicmusic.com
+dragonhd.xyz
+dubhe.site
+duckboobee.org
+emuwarez.com
+filelist.io
+gemini-tracker.org
+gfxpeers.net
+gtk.pw
+haidan.cc
+hares.top
+hdarea.club
+hdbao.cc
+hdchina.org
+hdcity.city
+hdcmct.org
+hdhome.org
+hdkyl.in
+hdsky.me
+hdstreet.club
+hdtime.org
+hdupt.com
+hdvideo.top
+hdwing.org
+hellenic-hd.cc
+hspt.club
+itzmx.com
+kamept.com
+karagarga.in
+kp.m-team.cc
+kufei.org
+learnflakes.net
+longpt.org
+lztr.me
+m-team.cc
+m-team.io
+msg.vg
+nanyangpt.com
+naturept.top
+njtupt.top
+open.cd
+ourbits.club
+ourhelp.club
+piggo.me
+playlet.cc
+pt.btschool.club
+pt.hdupt.com
+ptchdbits.co
+pter.club
+pterclub.net
+ptsbao.club
+pttime.org
+rousi.pro
+rutracker.net
+sbpt.link
+sewerpt.com
+sharkpt.net
+simurg.world
+skyeysnow.com
+soulvoice.club
+springsunday.net
+sunnypt.top
+telly.wtf
+tju.pt
+tjupt.org
+tleechreload.org
+tlgetin.cc
+torrentleech.cc
+torrentleech.me
+tosky.club
+totheglory.im
+u2.dmhy.org
+ubits.club
+uhddolby.com
+ultrahd.net
+upxin.net
+v6.nexushd.org
+whu.pt
+wiki.m-team.cc
+world-in-hd.net
+xingwan.cc
+yemapt.org
+yingk.com
+zhuque.in

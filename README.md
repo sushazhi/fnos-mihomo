@@ -190,6 +190,9 @@ python scripts/check-updates.py
 - **打包机**：任意装有 **Python 3.8+** 的机器（Windows / Linux / macOS）。
   仅用标准库，**无需** `curl`/`unzip`/`tar`/`zstd`；`fnpack` 会自动下载并缓存。
 - **目标机**：飞牛 fnOS 1.1.3100+（`os_min_version`）
+- **跑回归套件**（可选，CI 会跑）：`python tests/cfopt_test.py` 需要 **PyYAML**
+  （`python -m pip install "pyyaml>=6,<7"`）—— 它用 PyYAML 复核注入后的配置是否合法；
+  缺了会直接退出码 3 并打印 `[FATAL]`。`build.py` 本身不需要任何第三方包。
 
 ## 验证状态
 
@@ -339,6 +342,61 @@ sudo TRIM_APPDEST="<应用安装目录>" TRIM_PKGVAR="<数据目录>" \
 | `cfopt-history.log` | 内置测速历史：时间、候选数、可达数、采用数、最快延迟 |
 | `config.yaml.cfopt.bak` | 注入前的配置备份 |
 | `cfopt-rejected.yaml` | 仅在注入后校验失败时留存，用于排查 |
+| `cfopt-domains.txt` | 走优选 IP 的域名清单（**真源**，`cfopt-domains` 命令维护） |
+| `cfopt-scan.txt` | `cfopt-scan` / `cfopt-domains prune` 的扫描结果 |
+
+### 域名清单怎么维护（换域名 / 增删 / 清理）
+
+清单的真源是设备上的一个文件：`<数据目录>/cfopt-domains.txt`（每行一个域名，`#` 开头是
+注释）。**它故意不放在应用设置里**：向导的 text 字段有 1023 字节上限，而且表单是「整份
+替换」，浏览器自动填充带回旧值就会把整份清单冲掉（2026-10-19 真机踩过）。于是：
+
+- 向导里的「走优选 IP 的域名」框**只追加**，适合顺手加一两个；
+- 增删改走命令行（要带上 `TRIM_*`，`cmd/main` 不猜路径）：
+
+```bash
+sudo TRIM_APPDEST="<应用安装目录>" TRIM_PKGVAR="<数据目录>" \
+  "<应用安装目录>/cmd/main" cfopt-domains [子命令]
+```
+
+| 子命令 | 作用 |
+| --- | --- |
+| `list`（默认） | 打印当前清单 |
+| `add a.com,b.com` | 追加（去重，**绝不删**已有条目） |
+| `rm a.com` | 删除 |
+| `set a.com,b.com` | 整份替换 |
+| `import <文件>` | 从文件整份导入并合并（`#` 注释、逗号/空格/分号分隔都认） |
+| `prune` | 先把**清单本身**扫一遍（`cfopt-scan`），再删掉结论为「非 CF」的条目 |
+
+**站点换域名时怎么做**（例：杜比 `hddolby.com` → `uhddolby.com`，2026-11-20）：
+
+```bash
+# 1) 先确认新域名真的套 CF —— 不套 CF 的域名写进来会让站点直接打不开
+".../cmd/main" cfopt-scan "uhddolby.com,www.uhddolby.com"
+# 2) 加新域名、删旧域名
+".../cmd/main" cfopt-domains add uhddolby.com
+".../cmd/main" cfopt-domains rm  hddolby.com
+# 3) 立刻生效（不必等下一次定时刷新）
+".../cmd/main" cfopt-refresh
+```
+
+- 写**裸域**（`uhddolby.com`）覆盖该域及其所有子域，所以站点只解析 `www` 时也照样生效；
+  这种站点的裸域本身往往没有 A 记录，`cfopt-scan` 会把它标成「解析失败」——
+  那是正常现象，看 `www.` 那一行就够。
+- 懒得逐个删就用 `prune`：旧域名停用后 DNS 只剩污染应答（如 `1.1.1.1`）或 SERVFAIL，
+  会判「非 CF」而删掉；判「解析失败」的**不删**（可能只是一次超时），单独列出来，
+  确认停用后再 `rm`。`prune` 改前把原清单备份成 `cfopt-domains.txt.bak`。
+- 新清单会让 `map` 重测一遍：映射文件带域名指纹，域名集合一变就失效，
+  所以「换了域名却还在用旧 IP」不会发生。
+
+**为什么值得定期清**：每个域名每轮刷新都要做一次 TLS 实测选 IP（`map`），条目越多启动
+越慢；而真正套 CF 的站点一旦被塞进错的 IP 就直接打不开（2026-11-13：清单 272 条时
+hdwing / ourbits / 1ptba 全挂，已回滚）。所以只留**确实套 CF 且在用的**站点。
+
+**发现新站点**：`scripts/pt-depiler-sync.py`（上游 PT-depiler 的站点定义 + CF 网段判定，
+见文件头用法）；或 `cfopt-scan "<域名,域名>"` 手动试。仓库里的
+[`examples/cfopt-domains.txt`](examples/cfopt-domains.txt) 是一份**参考基线**（不进 fpk、
+不影响运行），把设备上的清单与它 diff 一下就知道差在哪。
 
 ### 生效原理（逐条对照过源码）
 

@@ -1126,15 +1126,26 @@ def _domains():
     替换」，浏览器自动填充的旧值会把整份清单冲掉（2026-10-19 真机踩过）。改成文件后
     既没有长度限制，也不会被一次保存误覆盖。
 
-    用法：domains <file> list|add <a,b>|rm <a,b>|set <a,b>
+    用法：domains <file> list
+          domains <file> add <a,b>|rm <a,b>|set <a,b>
+          domains <file> import <来源清单文件>
+          domains <file> prune  <cfopt-scan 的输出>
     退出码：0=成功 / 1=参数或 IO 错误。
+
+    为什么要 import / prune：清单是要长期维护的**数据**（站点会换域名、关站、迁出 CF），
+    而「谁配了什么」在换域名那天就过期了：
+      - import 让「在 PC 上改好一份清单，再整份推到设备」成为可能，不必把上百个域名
+        塞进命令行（也无须 SSH 里手拼 python3 绝对路径）；
+      - prune 只做减法，且判定的唯一依据是 cfopt-scan 的**实测**结论（DNS 落在 CF 官方
+        网段与否），自己不联网猜。所以它能离线跑、能单测，也不会因为一次解析超时
+        把好域名删掉 —— 判「解析失败」的一律保留并单独列出。
     """
     import os
     import re
     import sys
 
     if len(sys.argv) < 2:
-        print("cfopt: 用法: cfopt.py domains <文件> list|add|rm|set [域名...]")
+        print("cfopt: 用法: cfopt.py domains <文件> list|add|rm|set|import|prune [参数]")
         return 1
     path, action = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "list"
     domain_re = re.compile(
@@ -1149,7 +1160,9 @@ def _domains():
     def load():
         out = []
         try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
+            # utf-8-sig：清单常在 Windows 上编辑（记事本/PowerShell 会带 BOM），
+            # 不剥 BOM 时首行会被当成非法域名而静默丢掉。
+            with open(path, encoding="utf-8-sig", errors="replace") as fh:
                 for raw in fh:
                     line = raw.strip()
                     if not line or line.startswith("#"):
@@ -1167,6 +1180,103 @@ def _domains():
             fh.write("# 走 Cloudflare 优选 IP 的域名，每行一个（# 开头为注释）\n")
             fh.write("".join(d + "\n" for d in sorted(items)))
         os.replace(tmp, path)          # 原子替换：并发读的一方不会读到半截文件
+
+    def read_scan(scan_path):
+        """读 cfopt-scan 的输出（域名<TAB>v4<TAB>v6<TAB>结论），返回 {域名: 结论}。
+
+        读不到文件返回 None（与「扫到了但结论为空」区分开：后者不该被当成删除依据）。
+        """
+        verdicts = {}
+        try:
+            with open(scan_path, encoding="utf-8-sig", errors="replace") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    cols = line.split("\t")
+                    if len(cols) < 2:
+                        cols = line.split()
+                    if len(cols) < 2:
+                        continue
+                    d = norm(cols[0])
+                    if not d:
+                        continue
+                    # 套 CF 的那行会带「（已在清单）」后缀，判前缀时不能带着它
+                    verdicts[d] = cols[-1].replace("（已在清单）", "").strip()
+        except OSError:
+            return None
+        return verdicts
+
+    # 文件驱动的两个动作先处理：它们的参数是**路径**而不是域名，
+    # 落到下面的「按分隔符拆域名」逻辑里只会被当成非法域名丢掉。
+    if action in ("import", "prune"):
+        src = sys.argv[3] if len(sys.argv) > 3 else ""
+        if not src:
+            print("cfopt: 用法: cfopt.py domains <清单> %s <文件>" % action)
+            return 1
+
+        if action == "import":
+            try:
+                with open(src, encoding="utf-8-sig", errors="replace") as fh:
+                    body = fh.read()
+            except OSError as exc:
+                print("cfopt: 读不到来源清单 %r：%s" % (src, exc))
+                return 1
+            wanted = []
+            for raw_line in body.splitlines():
+                line = raw_line.split("#", 1)[0]     # 行尾注释不算域名
+                for part in re.split(r"[,\s;]+", line):
+                    d = norm(part)
+                    if d and d not in wanted:
+                        wanted.append(d)
+            if not wanted:
+                print("cfopt: 来源清单里没有合法域名：%r" % src)
+                return 1
+            cur = load()
+            merged = cur + [d for d in wanted if d not in cur]
+            save(merged)
+            print("cfopt: 从 %s 导入 %d 个域名（新增 %d 个），清单共 %d 个"
+                  % (src, len(wanted), len(merged) - len(cur), len(merged)))
+            return 0
+
+        verdicts = read_scan(src)
+        if verdicts is None:
+            print("cfopt: 读不到扫描结果 %r（先跑一次 cfopt-scan，再用它的输出裁剪）" % src)
+            return 1
+        cur = load()
+        keep, dropped, failed, unknown = [], [], [], []
+        for d in cur:
+            verdict = verdicts.get(d, "")
+            if verdict.startswith("非 CF"):
+                dropped.append(d)          # 明确解析到了地址、但不在 CF 网段 = 已经不套 CF
+                continue
+            keep.append(d)
+            if not verdict:
+                unknown.append(d)
+            elif verdict.startswith("解析失败"):
+                failed.append(d)           # 可能是临时超时/污染，绝不凭这个删
+        if not dropped:
+            print("cfopt: 清单 %d 个域名里没有「非 CF」条目，未做改动" % len(cur))
+            return 0
+
+        # 改前留一份原样副本：prune 是唯一会批量删条目的动作，出问题要能逐行对照。
+        try:
+            with open(path + ".bak", "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("".join(d + "\n" for d in sorted(cur)))
+        except OSError:
+            pass                           # 备份失败不影响主流程：save() 本身是原子替换
+        save(keep)
+        tail = "…" if len(dropped) > 10 else ""
+        print("cfopt: 移除 %d 个「非 CF」域名，清单剩余 %d 个：%s"
+              % (len(dropped), len(keep), ", ".join(dropped[:10]) + tail))
+        if failed:
+            tail = "…" if len(failed) > 10 else ""
+            print("cfopt: 另有 %d 个域名解析失败（可能只是临时网络问题），本次保留：%s"
+                  % (len(failed), ", ".join(failed[:10]) + tail))
+        if unknown:
+            print("cfopt: %d 个域名不在扫描结果里，本次保留" % len(unknown))
+        print("cfopt: 原清单已备份到 %s.bak" % path)
+        return 0
 
     args = " ".join(sys.argv[3:]) if len(sys.argv) > 3 else ""
     wanted, bad = [], []
@@ -1201,14 +1311,14 @@ def _domains():
         save(wanted)
         print("cfopt: 清单已设为 %d 个域名" % len(set(wanted)))
         return 0
-    print("cfopt: 未知操作 %r（支持 list|add|rm|set）" % action)
+    print("cfopt: 未知操作 %r（支持 list|add|rm|set|import|prune）" % action)
     return 1
 
 
 # ══ 派发 ═══════════════════════════════════════════════════════════
 def main(argv):
     if not argv:
-        print("cfopt: 用法: cfopt.py {fetch|measure|inject|scan|map} ...")
+        print("cfopt: 用法: cfopt.py {fetch|measure|inject|scan|map|domains} ...")
         return 1
     sub, rest = argv[0], argv[1:]
     # 让各段沿用抽取前的 sys.argv[N] 取参方式：argv[1] 就是第一个业务参数。

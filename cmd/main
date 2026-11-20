@@ -905,6 +905,42 @@ case "${1:-start}" in
         fi
         exit "${rc}"
         ;;
+    cfopt-domains)
+        # 手动命令：维护「走优选 IP 的域名清单」（${DATA_DIR}/cfopt-domains.txt）。
+        # 为什么需要这个入口：向导里的域名框只能**追加**（表单是整份提交，浏览器带回
+        # 旧值就会把清单冲掉），而换站点域名 / 删站点 / 清理失效站点都需要「改」和「删」；
+        # 没有它时只能在 SSH 里手拼 python3 的绝对路径。
+        # 用法：
+        #   cmd/main cfopt-domains                                   # = list
+        #   cmd/main cfopt-domains add  a.com,b.com
+        #   cmd/main cfopt-domains rm   a.com
+        #   cmd/main cfopt-domains set  a.com,b.com
+        #   cmd/main cfopt-domains import /path/cfopt-domains.txt     # 从文件整份导入（合并）
+        #   cmd/main cfopt-domains prune    # 先扫清单，再删掉结论为「非 CF」的条目
+        [ -f "${CFOPT_PY}" ] || { log "WARN cfopt: 找不到 ${CFOPT_PY}"; exit 1; }
+        action="${2:-list}"
+        rest="${*:3}"
+        if [ "${action}" = "prune" ]; then
+            # 判定只能来自实测：把**清单本身**交给 cfopt-scan 扫一遍，再按结论做减法。
+            # 为什么不扫已注入片段：没有映射的域名本来就不会被注入，只扫片段永远扫不到它们。
+            [ -s "${CFOPT_DOMAINS_FILE}" ] || { echo "清单为空：${CFOPT_DOMAINS_FILE}"; exit 0; }
+            domains_csv="$(grep -vhE '^[[:space:]]*(#|$)' "${CFOPT_DOMAINS_FILE}" 2>/dev/null \
+                | tr '\n' ',')" || true
+            [ -n "${domains_csv}" ] || { echo "清单为空：${CFOPT_DOMAINS_FILE}"; exit 0; }
+            if /usr/bin/python3 "${CFOPT_PY}" scan "${CFOPT_SNIPPET}" "${DATA_DIR}/cfopt-scan.txt" \
+                    "${domains_csv}" >> "${LOG_FILE}" 2>&1; then
+                log "cfopt: 已按清单扫描一遍，结果在 ${DATA_DIR}/cfopt-scan.txt"
+            else
+                log "WARN cfopt: 扫描失败，未裁剪清单（详见日志）"
+                exit 1
+            fi
+            /usr/bin/python3 "${CFOPT_PY}" domains "${CFOPT_DOMAINS_FILE}" prune \
+                "${DATA_DIR}/cfopt-scan.txt"
+            exit $?
+        fi
+        /usr/bin/python3 "${CFOPT_PY}" domains "${CFOPT_DOMAINS_FILE}" "${action}" "${rest}"
+        exit $?
+        ;;
     cfopt-daemon)
         # 内部命令：后台常驻，周期性调用 cfopt-refresh。
         # 每个周期都重新 fork 一个完整脚本进程，因此改完设置重启应用即生效。
@@ -919,6 +955,6 @@ case "${1:-start}" in
         exit 3          # 官方约定：3 = 未运行
         ;;
     *)
-        fail "未知命令: $1（支持 start|stop|status）"
+        fail "未知命令: $1（支持 start|stop|status|cfopt-refresh|cfopt-scan|cfopt-domains）"
         ;;
 esac

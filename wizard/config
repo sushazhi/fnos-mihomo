@@ -101,7 +101,7 @@
         "field": "wizard_cfopt_domain_add",
         "label": "追加优选域名（可留空）",
         "initValue": "",
-        "helpText": "逗号分隔，会<b>追加</b>进清单、不会删除已有域名（example.com 覆盖该域名及所有子域）。清单存在数据目录的 cfopt-domains.txt，可用应用设置→状态页或命令查看/删除。留空即保持现有清单不变。"
+        "helpText": "逗号分隔，会<b>追加</b>进清单、不会删除已有域名（example.com 覆盖该域名及所有子域）。清单存在数据目录的 cfopt-domains.txt；查看/删除/清理用 <b>cmd/main cfopt-domains</b>（list|add|rm|set|import|prune）。留空即保持现有清单不变。"
       },
       {
         "type": "select",
